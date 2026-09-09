@@ -4,50 +4,59 @@ Last updated: 2026-09-09
 
 ## Current Phase
 
-Project initialization and MVP foundation.
+MVP definition and project foundation.
 
 ## Completed
 
 - Development environment prepared
-- Git repository initialized
-- DeepSeek Harness installed and workspace access verified
-- DeepSeek API configured
-- Harness read/write/terminal smoke test passed
+- Git/GitHub repository initialized and synced
+- DeepSeek Harness configured and smoke-tested
 - AGENTS.md created
-- PRODUCT.md created
+- PRODUCT.md updated
+- MVP confirmed to support two product categories:
+  - Children's toys
+  - Small consumer electronics
+- Product classification confirmed as a core capability
+- Human-reviewed policy update workflow confirmed
 
-## In Progress
+## Current Core Flow
 
-- Establishing project documentation and baseline structure
-
-## Next
-
-1. Create DECISIONS.md
-2. Create basic project structure
-3. Confirm technical architecture
-4. Create first Git baseline commit
-5. Start implementing the MVP core flow
-
-## Known Issues
-
-- None currently blocking development
-
-## Current MVP Goal
-
-Build one complete demo flow:
-
-User Input
-→ Product Understanding
-→ Compliance Check
+User Product
+→ Product Classification
+→ Supported Category Check
+→ Compliance Lookup
 → Clarification if needed
 → Cost Calculation
 → Import Readiness Report
 
-## Demo Cases
+If the product is outside the supported categories, stop and report that relevant compliance information is unavailable.
 
-- Children's wooden blocks
-- Bluetooth earphones
+## Policy Update Flow
 
-## Current Priority
+Human clicks "Check Policy Updates"
+→ Agent checks an approved source
+→ Candidate update
+→ Human Approve / Reject
+→ Approved data enters the knowledge base
 
-Get the smallest end-to-end version running before adding polish or optional features.
+For the MVP, one official policy source is sufficient.
+
+## Current Risks
+
+- Verified compliance data has not yet been collected
+- MVP policy source has not yet been selected
+- Technical architecture must reflect classification and policy review
+
+## Next
+
+1. Compress/update DECISIONS.md
+2. Define compliance data structure
+3. Research verified policy data
+4. Confirm minimal technical architecture
+5. Create project structure
+6. Commit updated baseline
+7. Build the core end-to-end flow
+
+## Priority
+
+Get verified data and the smallest complete workflow running before adding polish or broader policy coverage.

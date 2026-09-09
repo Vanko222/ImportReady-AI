@@ -1,87 +1,97 @@
 # ImportReady AI — Project Decisions
 
-## D001 — MVP First
+## D001 — MVP Scope
 
-**Decision:** Build the smallest complete, demo-ready MVP before adding optional features.
+Build the smallest complete, demo-ready MVP first.
 
-**Reason:** The hackathon development window is limited. A complete end-to-end demo is more important than feature breadth.
-
----
-
-## D002 — Limited Product Scope
-
-**Decision:** The MVP supports:
+Supported:
 
 - USA market
 - Amazon / eBay
 - Children's toys
-- Small electronic products
+- Small consumer electronics
 
-Features outside the confirmed MVP scope will not be added unless explicitly approved.
+Wooden blocks and Bluetooth earphones are demo examples, not fixed supported products.
 
----
-
-## D003 — Agent-Oriented Product
-
-**Decision:** ImportReady AI is an agent workflow, not a simple compliance chatbot.
-
-The Agent should:
-
-1. Understand the purchasing goal
-2. Determine relevant checks
-3. Ask for missing information
-4. Use tools
-5. Convert compliance risk into actionable cost and purchasing advice
+If a product is outside the supported categories, stop safely instead of inventing compliance information.
 
 ---
 
-## D004 — Grounded Compliance Data
+## D002 — Core Agent Flow
 
-**Decision:** Compliance requirements and cost figures must not be invented by the language model.
+ImportReady AI is an agent workflow, not a simple compliance chatbot.
+
+Core flow:
+
+Product Input
+→ Classification
+→ Supported Category Check
+→ Compliance Lookup
+→ User Clarification if needed
+→ Cost Calculation
+→ Import Readiness Report
+
+---
+
+## D003 — Grounded Compliance Data
+
+Compliance rules, certifications, policy details, and cost figures must not rely on model memory alone.
 
 Use approved project data or verified sources.
 
-Uncertain information must be labeled as estimated or unverified.
+Unknown or estimated information must be clearly labeled.
 
 ---
 
-## D005 — Development Roles
+## D004 — Human-in-the-Loop
 
-**Decision:**
+Two human checkpoints are required:
+
+1. Missing product information
+   → Agent asks user
+   → User confirms
+   → Analysis continues
+
+2. Policy update
+   → Human triggers policy check
+   → Agent prepares candidate update
+   → Human Approves / Rejects
+   → Only approved data enters the knowledge base
+
+The Agent must not autonomously modify trusted compliance data.
+
+---
+
+## D005 — Policy Update MVP
+
+For the MVP, one approved official policy source is sufficient.
+
+Prove the complete review-and-update loop first.
+
+Large-scale crawling, multi-source monitoring, and fully autonomous policy updates are out of scope.
+
+---
+
+## D006 — Development Responsibilities
 
 - User → Product owner and final decision-maker
-- ChatGPT main chat → Project controller and technical/product decision support
+- ChatGPT main chat → Project controller
+- ChatGPT Work → Policy research and bounded research/review
 - DeepSeek Harness → Primary coding agent
-- ChatGPT Work → Bounded research, analysis, review, and document tasks
 - Git → Source/version control
 - Project Markdown files → Persistent project context
 
----
-
-## D006 — Implementation Strategy
-
-**Decision:** Prefer simple, local, reversible implementations.
-
-Avoid:
-
-- Premature abstraction
-- Unnecessary refactoring
-- Complex infrastructure
-- Building custom agent frameworks/plugins during the hackathon
+Policy research and coding remain separated:
+Work researches → main controller reviews → Harness implements approved data.
 
 ---
 
-## D007 — Validation Strategy
+## D007 — Engineering Rules
 
-**Decision:** Validation effort should match change risk.
+Prefer simple, local, reversible implementations.
 
-Agent completion reports alone are not proof of success.
-Important changes require objective validation such as tests, builds, commands, or verified runtime behavior.
+Avoid unnecessary infrastructure, abstractions, refactoring, or dependency changes.
 
----
+Validation must match risk and use objective evidence.
 
-## D008 — Git Discipline
-
-**Decision:** Keep changes small and reviewable.
-
-Coding agents should not automatically commit or perform destructive Git operations without explicit approval.
+Coding agents must not automatically commit, rewrite Git history, or perform destructive Git operations.
