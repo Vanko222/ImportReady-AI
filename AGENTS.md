@@ -1,98 +1,59 @@
-# AGENTS.md
-
 # ImportReady AI — Agent Rules
 
-## 1. Mission & Priority
+## 1. Priority
 
-Build the smallest reliable, demo-ready MVP within the hackathon deadline.
-
-Priority:
+Follow this order:
 
 1. Safety and factual correctness
 2. Current task acceptance criteria
-3. Keep existing working features functional
-4. Minimal focused changes
-5. Speed and token/API cost efficiency
+3. Preserve working functionality
+4. Minimal task-scoped changes
+5. Speed and token/API efficiency
 
-Do not expand scope or optimize beyond the current task unless explicitly requested.
+Do not expand scope, optimize, or refactor beyond the current task unless asked.
 
----
-
-## 2. MVP Scope
-
-Current scope:
-
-- Market: USA
-- Platforms: Amazon / eBay
-- Products:
-  - Children's toys
-  - Small electronics
-- Core flow:
-  - Understand product information
-  - Identify compliance checks
-  - Ask for missing information
-  - Estimate compliance-related cost impact
-  - Generate an Import Readiness Report
-
-Out of scope unless explicitly requested:
-
-- Global markets
-- Automatic HS Code determination
-- Automatic customs declaration
-- Tariff avoidance
-- Supplier credit investigation
-
----
-
-## 3. Grounding & Hallucination Control
+## 2. Grounding & Hallucination Control
 
 Never present assumptions as facts.
 
-Important information must be treated as one of:
+Treat important information as:
 
 - Confirmed
 - Inferred
 - Estimated
 - Unknown / unverified
 
-For regulations, certifications, compliance requirements, costs, fees,
-legal claims, or other external facts:
+For compliance rules, certifications, legal claims, costs, fees, and other external facts:
 
 - Never invent missing information.
 - Never guess exact numbers.
 - Use approved project data or verified sources.
-- Clearly label estimates.
+- Clearly label estimates and uncertainty.
 - If evidence is insufficient, say so.
 
-Actual files, code execution, tests, logs, and tool output take precedence
-over previous assumptions.
+Actual files, code, tests, logs, and tool output override previous assumptions.
 
----
+## 3. Memory Hygiene
 
-## 4. Memory Hygiene
+Do not store guesses, failed experiments, temporary observations, or unverified conclusions as project facts.
 
-Do not store guesses, failed experiments, temporary observations,
-or unverified conclusions as project facts.
-
-Persistent project documentation should contain only verified information.
+Persistent project files should contain only verified information.
 
 If new evidence conflicts with existing documentation:
 
 1. Identify the conflict.
 2. Verify the correct information.
-3. Update documentation only after confirmation.
+3. Update only after confirmation.
 
-Use:
+Use project files by role:
 
 - AGENTS.md → stable agent rules
 - PRODUCT.md → confirmed product definition
+- STATUS.md → current progress and blockers
+- DECISIONS.md → confirmed key decisions
 - ARCHITECTURE.md → confirmed technical architecture
-- STATUS.md → current state, progress, blockers
-- DECISIONS.md → confirmed important decisions
 
----
-
-## 5. Task & Context Discipline
+## 4. Task & Context Discipline
 
 Before editing, determine:
 
@@ -101,59 +62,56 @@ Before editing, determine:
 - Acceptance criteria
 - Required validation
 
-Read only the files needed for the task.
-Expand repository search only when necessary.
+Read only files needed for the task.
+Expand search only when necessary.
 Do not repeatedly read unchanged files or scan the full repository without reason.
 
-Prefer the smallest working change.
+Make the smallest working change.
 
 Do not:
 
 - Add unrelated features
+- Modify unrelated files
 - Perform unrelated refactors
 - Rewrite working code unnecessarily
-- Modify unrelated files
-- Change architecture or public behavior without approval
-- Add speculative abstractions for future use
+- Change architecture, dependencies, or public behavior without need
+- Add speculative abstractions
 
-This is a hackathon MVP. Prefer simple and reliable solutions.
+Prefer simple, reliable MVP solutions.
 
----
+## 5. Dependencies, Environment & Safety
 
-## 6. Dependencies & Environment
+Primary host environment: Windows + PowerShell.
 
-Do not add or upgrade dependencies unless necessary for the current task.
+Do not assume macOS/Linux host commands unless explicitly working inside a confirmed Linux environment.
 
-Avoid replacing working libraries or installing large toolchains without clear value.
+Do not add or upgrade dependencies unless necessary.
 
-Primary environment:
+Never expose or commit:
 
-- Windows
-- PowerShell
-- VS Code
-- Git
-- Docker
-- DeepSeek Harness
+- API keys
+- Tokens
+- Passwords
+- Credentials
 
-Do not assume macOS/Linux host commands unless explicitly working inside
-a confirmed Linux environment.
+Use environment variables or `.env` where appropriate.
 
----
+Work only inside the current workspace unless explicitly authorized.
 
-## 7. Validation & Debugging
+## 6. Validation, Debugging & Stop Rules
 
-Validation must match change risk:
+Validation must match risk:
 
-- Low risk: targeted check
-- Medium risk: relevant tests + affected workflow
-- High risk: broader integration validation
+- Low risk → targeted check
+- Medium risk → relevant tests + affected workflow
+- High risk → broader integration validation
 
 A task is complete only with objective evidence such as:
 
 - Passing test
 - Successful build
 - Successful command
-- Verified application behavior
+- Verified runtime behavior
 - Relevant logs/output
 
 Do not repeatedly rerun successful checks without new changes.
@@ -167,14 +125,18 @@ When debugging:
 
 Do not randomly modify multiple areas.
 
-If essentially the same strategy fails 2–3 times, stop, summarize evidence,
-and request guidance or propose a different approach.
+If essentially the same strategy fails 2–3 times:
 
----
+- Stop
+- Summarize evidence
+- Propose a different approach or request guidance
 
-## 8. Git, Safety & Secrets
+Stop once acceptance criteria pass.
+Do not continue polishing or optimizing unless asked.
 
-Keep diffs small and task-focused.
+## 7. Git & Change Safety
+
+Keep diffs small and reviewable.
 
 Do not automatically:
 
@@ -185,22 +147,11 @@ Do not automatically:
 - Perform destructive resets
 - Revert unrelated user changes
 
-Never expose or commit:
+Do not perform destructive actions without explicit approval.
 
-- API keys
-- Tokens
-- Passwords
-- Credentials
+## 8. Human Decision Boundary
 
-Use environment variables or `.env` where appropriate and keep secrets out of Git.
-
-Work only inside the current workspace unless explicitly authorized.
-
----
-
-## 9. Human Decision Boundary
-
-Stop and ask before materially changing:
+Ask before materially changing:
 
 - Product scope
 - Core architecture
@@ -213,11 +164,15 @@ Stop and ask before materially changing:
 
 Routine implementation details do not require approval.
 
----
+## 9. Token & Cost Efficiency
 
-## 10. Efficiency, Completion & Reporting
+Prefer:
 
-Use only the context needed to complete the task correctly.
+- Targeted file reads
+- Small edits
+- Stable project context
+- Concise tool output
+- Short final reports
 
 Avoid:
 
@@ -225,16 +180,12 @@ Avoid:
 - Dumping large unchanged files
 - Repeated repository scans
 - Long completion explanations
-- Endless optimization or retry loops
+- Endless retry loops
+- Unnecessary high-effort model use
 
-Stop when:
+## 10. Completion Report
 
-- Acceptance criteria are met
-- Required validation passes
-- No critical regression exists
-- No blocker prevents the task from working
-
-Final report:
+Return only:
 
 ### Changed
 - Files changed
@@ -245,9 +196,7 @@ Final report:
 - Result
 
 ### Remaining
-- Known blocker/risk, or "None"
-
-Keep the report concise.
+- Blocker/risk, or "None"
 
 When uncertainty affects correctness, scope, security, cost, or architecture:
 verify first; if still uncertain, ask instead of guessing.
