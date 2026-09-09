@@ -1,0 +1,304 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-09-09T11:13:35Z",
+  "source_files": [
+    {
+      "file_name": "ImportReady_AI_Compliance_Dataset.xlsx",
+      "sha256": "08ca710adf4543b65a1ceb281e2cbf4cddfe4b8fc2590ad15de29e93face352a",
+      "role": "base structured data"
+    },
+    {
+      "file_name": "ImportReady_AI_Compliance_Research_Report.docx",
+      "sha256": "714e9b97e9228a730df5dbf7de2eb7e4cccc70f30af10eb9eddb636c9a54cc29",
+      "role": "explanatory context and evidence"
+    },
+    {
+      "file_name": "ImportReady_AI_Compliance_Supplement_v1.xlsx",
+      "sha256": "d178d00b481d4bcf5c33770ebcf378c1f934bbc31de2aebd4b3ae339e946d5c7",
+      "role": "structured patches and additions"
+    },
+    {
+      "file_name": "ImportReady_AI_Compliance_Supplement_Notes_v1.docx",
+      "sha256": "1c6b845ec1985c7f92e8f5bc0f54beac705a411865dc657737ed67ef37ad3715",
+      "role": "correction guidance and implementation notes"
+    }
+  ],
+  "records": [
+    {
+      "gap_id": "CONV-GAP-001",
+      "area": "Schema coverage",
+      "related_rule_ids": [
+        "R-ELEC-008",
+        "R-ELEC-013",
+        "R-ELEC-018",
+        "R-ELEC-019",
+        "R-TOY-009",
+        "R-TOY-016",
+        "R-TOY-017",
+        "R-TOY-018"
+      ],
+      "related_source_ids": [],
+      "evidence_status": "NOT_FOUND",
+      "rule_status": null,
+      "issue": "The approved supplement does not provide minimum-information clarification mappings for P1 rules.",
+      "attempt_result": "Required attributes were retained from the original taxonomy links where available, but no source-authored clarification question, blocking flag, or runtime status was supplied for these P1 records.",
+      "mvp_handling": "Keep P1 rules as review-only escalation records until a separately approved mapping is added; do not generate a definitive applicability result from missing fields."
+    },
+    {
+      "gap_id": "GAP-006",
+      "area": "Federal applicability",
+      "related_rule_ids": [],
+      "related_source_ids": [],
+      "evidence_status": "UNVERIFIED",
+      "rule_status": null,
+      "issue": "Exact ASTM F963 sections for an arbitrary toy",
+      "attempt_result": "The applicable-section set cannot be determined without age grade, construction, materials, and play features. The matrix lists routing logic, not a universal test package.",
+      "mvp_handling": "Use the attribute checklist to generate a candidate section list, then require laboratory/compliance review before marking applicable."
+    },
+    {
+      "gap_id": "GAP-007",
+      "area": "Federal applicability",
+      "related_rule_ids": [],
+      "related_source_ids": [],
+      "evidence_status": "UNVERIFIED",
+      "rule_status": null,
+      "issue": "FCC rule part and test modes for an arbitrary radio",
+      "attempt_result": "Protocol name alone does not determine all technical sections, antennas, bandwidths, powers, exposure modes, or licensed-service rules.",
+      "mvp_handling": "Require band, antenna, power, simultaneous-transmission, module-grant, and body-separation fields before lab scoping."
+    },
+    {
+      "gap_id": "GAP-009",
+      "area": "State law",
+      "related_rule_ids": [],
+      "related_source_ids": [],
+      "evidence_status": "NOT_FOUND",
+      "rule_status": null,
+      "issue": "State chemical, battery EPR, children's-product, privacy, and connected-device overlays outside California Proposition 65",
+      "attempt_result": "A 50-state survey was outside the bounded source set and rules change frequently.",
+      "mvp_handling": "MVP should ask sales states and show a state-law review flag outside California; do not display NOT FOUND as not required."
+    },
+    {
+      "gap_id": "GAP-010",
+      "area": "Transport",
+      "related_rule_ids": [],
+      "related_source_ids": [],
+      "evidence_status": "NOT_FOUND",
+      "rule_status": null,
+      "issue": "Carrier-specific air/sea/parcel lithium battery rules",
+      "attempt_result": "DOT/PHMSA sets federal baseline, but carrier tariffs and IATA/ICAO/IMDG implementations can be stricter and route-specific.",
+      "mvp_handling": "Add carrier, mode, origin, battery configuration, and quantity to a later transport module."
+    },
+    {
+      "gap_id": "SUP-GAP-001",
+      "area": "Toy cost",
+      "related_rule_ids": [
+        "R-TOY-004",
+        "R-TOY-005"
+      ],
+      "related_source_ids": [
+        "S055",
+        "S070"
+      ],
+      "evidence_status": "NOT_FOUND",
+      "rule_status": "EFFECTIVE",
+      "issue": "Current standalone lead-testing public price",
+      "attempt_result": "Recognized providers publicly describe the service, and SGS bundles heavy-metals testing, but no reliable current itemized lead-only price was found.",
+      "mvp_handling": "Return QUOTE_REQUIRED; ask for component/material/color count and CPSC test method."
+    },
+    {
+      "gap_id": "SUP-GAP-002",
+      "area": "Toy cost",
+      "related_rule_ids": [
+        "R-TOY-006"
+      ],
+      "related_source_ids": [
+        "S055",
+        "S070"
+      ],
+      "evidence_status": "NOT_FOUND",
+      "rule_status": "EFFECTIVE",
+      "issue": "Current standalone phthalates-testing public price",
+      "attempt_result": "Recognized providers publicly describe or bundle the service, but no reliable current itemized price per plasticized component was found.",
+      "mvp_handling": "Return QUOTE_REQUIRED; do not reuse old regulatory estimates as current vendor pricing."
+    },
+    {
+      "gap_id": "SUP-GAP-003",
+      "area": "FCC cost",
+      "related_rule_ids": [
+        "R-ELEC-002"
+      ],
+      "related_source_ids": [
+        "S066",
+        "S067",
+        "S068"
+      ],
+      "evidence_status": "NOT_FOUND",
+      "rule_status": "EFFECTIVE",
+      "issue": "Public TCB review/certification fee",
+      "attempt_result": "Three FCC TCB provider pages were checked; each describes the service but requires a quote or account workflow.",
+      "mvp_handling": "Return QUOTE_REQUIRED and request itemization for filing, confidentiality, KDB, and permissive changes."
+    },
+    {
+      "gap_id": "SUP-GAP-004",
+      "area": "Battery cost",
+      "related_rule_ids": [
+        "R-ELEC-012"
+      ],
+      "related_source_ids": [
+        "S063",
+        "S064",
+        "S065"
+      ],
+      "evidence_status": "UNVERIFIED",
+      "rule_status": "EFFECTIVE",
+      "issue": "Independent current UN 38.3 public prices",
+      "attempt_result": "One China-lab public range was found, while Intertek and Kiwa remain quote-only; a defensible current market range was not established.",
+      "mvp_handling": "Show the vendor range only with LOW confidence; procurement must obtain 2-3 quotes."
+    },
+    {
+      "gap_id": "SUP-GAP-005",
+      "area": "Amazon cost",
+      "related_rule_ids": [
+        "R-TOY-019",
+        "R-ELEC-015"
+      ],
+      "related_source_ids": [
+        "S053",
+        "S054",
+        "S069"
+      ],
+      "evidence_status": "NOT_FOUND",
+      "rule_status": "EFFECTIVE",
+      "issue": "Amazon-approved provider public pricing",
+      "attempt_result": "Amazon's official workflow supports requesting quotes from multiple providers, but no reliable public standardized price was found and the live provider list is account/ASIN dependent.",
+      "mvp_handling": "Return QUOTE_REQUIRED; never display a universal Amazon-approved price."
+    },
+    {
+      "gap_id": "SUP-GAP-006",
+      "area": "Amazon toy evidence",
+      "related_rule_ids": [
+        "R-TOY-019"
+      ],
+      "related_source_ids": [
+        "S049",
+        "S052",
+        "S053",
+        "S054"
+      ],
+      "evidence_status": "VERIFIED",
+      "rule_status": "EFFECTIVE",
+      "issue": "US children's-toy evidence detail",
+      "attempt_result": "Official 2026 moderator guidance verifies a typical CPC plus a test report issued within 12 months by a CPSC-accepted lab, with ASTM F963-23, phthalates, tracking-label and small-parts coverage; exact ASIN/provider decisions remain dynamic.",
+      "mvp_handling": "Implement these as expected-document tasks, then set REVIEW_REQUIRED until Account Health/provider confirmation."
+    },
+    {
+      "gap_id": "SUP-GAP-007",
+      "area": "Amazon lithium evidence",
+      "related_rule_ids": [
+        "R-ELEC-015"
+      ],
+      "related_source_ids": [
+        "S032",
+        "S050"
+      ],
+      "evidence_status": "UNVERIFIED",
+      "rule_status": "EFFECTIVE",
+      "issue": "Exact rechargeable-lithium test standards, report-age rules and document fields",
+      "attempt_result": "The official forum verifies policy scope plus listing attributes and TIC verification, but the detailed help-page body remained login/JavaScript restricted.",
+      "mvp_handling": "Keep exact document standards UNVERIFIED and route to Seller Central review."
+    },
+    {
+      "gap_id": "SUP-GAP-008",
+      "area": "Source accessibility",
+      "related_rule_ids": [
+        "R-TOY-019",
+        "R-ELEC-015"
+      ],
+      "related_source_ids": [
+        "S049",
+        "S050",
+        "S069"
+      ],
+      "evidence_status": "UNVERIFIED",
+      "rule_status": "EFFECTIVE",
+      "issue": "Reliable unauthenticated re-access to Amazon help detail",
+      "attempt_result": "Canonical help reference IDs were preserved, but full details could not be reliably re-accessed without authenticated seller context.",
+      "mvp_handling": "Use official forum pages for public baseline and require authenticated manual update check for final platform detail."
+    },
+    {
+      "gap_id": "SUP-GAP-009",
+      "area": "Lifecycle",
+      "related_rule_ids": [
+        "R-ELEC-019"
+      ],
+      "related_source_ids": [
+        "S046"
+      ],
+      "evidence_status": "VERIFIED",
+      "rule_status": "PROPOSED",
+      "issue": "FCC 2026 supply-chain/SDoC/U.S.-liable-party proposals",
+      "attempt_result": "The proposal is verified, but no final effective rule implementing these proposed concepts was identified by 2026-09-09.",
+      "mvp_handling": "Exclude from obligations; display WATCH/PROPOSED only."
+    },
+    {
+      "gap_id": "SUP-GAP-010",
+      "area": "Lifecycle",
+      "related_rule_ids": [
+        "R-ELEC-018"
+      ],
+      "related_source_ids": [
+        "S045"
+      ],
+      "evidence_status": "VERIFIED",
+      "rule_status": "WATCHLIST",
+      "issue": "UL 62368-1 industry safety standard",
+      "attempt_result": "The standard/service exists, but the original dataset did not verify a universal federal requirement for every small consumer electronic product.",
+      "mvp_handling": "Keep as optional/recommended or REVIEW_REQUIRED; do not auto-fail."
+    },
+    {
+      "gap_id": "SUP-GAP-012",
+      "area": "Update workflow",
+      "related_rule_ids": [
+        "R-CMN-001",
+        "R-CMN-002",
+        "R-ELEC-001",
+        "R-ELEC-002",
+        "R-ELEC-003",
+        "R-ELEC-004",
+        "R-ELEC-005",
+        "R-ELEC-006",
+        "R-ELEC-007",
+        "R-ELEC-009",
+        "R-ELEC-010",
+        "R-ELEC-011",
+        "R-ELEC-012",
+        "R-ELEC-014",
+        "R-ELEC-015",
+        "R-ELEC-016",
+        "R-ELEC-017",
+        "R-TOY-001",
+        "R-TOY-002",
+        "R-TOY-003",
+        "R-TOY-004",
+        "R-TOY-005",
+        "R-TOY-006",
+        "R-TOY-007",
+        "R-TOY-008",
+        "R-TOY-010",
+        "R-TOY-011",
+        "R-TOY-012",
+        "R-TOY-013",
+        "R-TOY-014",
+        "R-TOY-015",
+        "R-TOY-019",
+        "R-TOY-020"
+      ],
+      "related_source_ids": [],
+      "evidence_status": "VERIFIED",
+      "rule_status": "EFFECTIVE",
+      "issue": "Many guidance/platform pages lack a machine-readable update date",
+      "attempt_result": "Stable canonical URLs and check paths are provided, but body-diff/manual confirmation remains necessary for pages without explicit revisions.",
+      "mvp_handling": "Store immutable check history; do not overwrite prior status or silently infer no change."
+    }
+  ]
+}

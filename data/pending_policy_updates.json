@@ -1,0 +1,27 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-09-09T11:13:35Z",
+  "source_files": [
+    {
+      "file_name": "ImportReady_AI_Compliance_Dataset.xlsx",
+      "sha256": "08ca710adf4543b65a1ceb281e2cbf4cddfe4b8fc2590ad15de29e93face352a",
+      "role": "base structured data"
+    },
+    {
+      "file_name": "ImportReady_AI_Compliance_Research_Report.docx",
+      "sha256": "714e9b97e9228a730df5dbf7de2eb7e4cccc70f30af10eb9eddb636c9a54cc29",
+      "role": "explanatory context and evidence"
+    },
+    {
+      "file_name": "ImportReady_AI_Compliance_Supplement_v1.xlsx",
+      "sha256": "d178d00b481d4bcf5c33770ebcf378c1f934bbc31de2aebd4b3ae339e946d5c7",
+      "role": "structured patches and additions"
+    },
+    {
+      "file_name": "ImportReady_AI_Compliance_Supplement_Notes_v1.docx",
+      "sha256": "1c6b845ec1985c7f92e8f5bc0f54beac705a411865dc657737ed67ef37ad3715",
+      "role": "correction guidance and implementation notes"
+    }
+  ],
+  "records": []
+}

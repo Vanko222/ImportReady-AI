@@ -1,0 +1,1593 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-09-09T11:13:35Z",
+  "source_files": [
+    {
+      "file_name": "ImportReady_AI_Compliance_Dataset.xlsx",
+      "sha256": "08ca710adf4543b65a1ceb281e2cbf4cddfe4b8fc2590ad15de29e93face352a",
+      "role": "base structured data"
+    },
+    {
+      "file_name": "ImportReady_AI_Compliance_Research_Report.docx",
+      "sha256": "714e9b97e9228a730df5dbf7de2eb7e4cccc70f30af10eb9eddb636c9a54cc29",
+      "role": "explanatory context and evidence"
+    },
+    {
+      "file_name": "ImportReady_AI_Compliance_Supplement_v1.xlsx",
+      "sha256": "d178d00b481d4bcf5c33770ebcf378c1f934bbc31de2aebd4b3ae339e946d5c7",
+      "role": "structured patches and additions"
+    },
+    {
+      "file_name": "ImportReady_AI_Compliance_Supplement_Notes_v1.docx",
+      "sha256": "1c6b845ec1985c7f92e8f5bc0f54beac705a411865dc657737ed67ef37ad3715",
+      "role": "correction guidance and implementation notes"
+    }
+  ],
+  "records": [
+    {
+      "attribute_id": "A-CMN-001",
+      "category": "common",
+      "group": "Classification",
+      "attribute_name": "product_category",
+      "data_type": "enum",
+      "allowed_values": [
+        "childrens_toys",
+        "small_consumer_electronics",
+        "dual",
+        "unsupported",
+        "uncertain"
+      ],
+      "why_it_matters": "Primary routing field. Dual or uncertain products require both rule sets until classification is resolved. For dual products, evaluate both relevant category paths and collect only the union of attributes required by the triggered rules, de-duplicated by canonical attribute_id.",
+      "triggered_rule_ids": [
+        "R-TOY-001",
+        "R-ELEC-001",
+        "R-TOY-003",
+        "R-TOY-014",
+        "R-TOY-019",
+        "R-ELEC-017"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-CMN-002",
+      "category": "common",
+      "group": "Market",
+      "attribute_name": "country_of_origin",
+      "data_type": "text",
+      "allowed_values": [
+        "Country where article was manufactured or substantially transformed"
+      ],
+      "why_it_matters": "Triggers federal country-of-origin marking for imported articles or their containers.",
+      "triggered_rule_ids": [
+        "R-CMN-001"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-CMN-003",
+      "category": "common",
+      "group": "Market",
+      "attribute_name": "sales_states",
+      "data_type": "multi_select",
+      "allowed_values": [
+        "US states and territories; California flag"
+      ],
+      "why_it_matters": "California sales trigger a Proposition 65 exposure screen; other state overlays remain a gap.",
+      "triggered_rule_ids": [
+        "R-CMN-002"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-CMN-004",
+      "category": "common",
+      "group": "Platform",
+      "attribute_name": "marketplace",
+      "data_type": "multi_select",
+      "allowed_values": [
+        "Amazon",
+        "eBay",
+        "other"
+      ],
+      "why_it_matters": "Routes platform-specific evidence and listing controls separately from federal law.",
+      "triggered_rule_ids": [
+        "R-TOY-019",
+        "R-TOY-020",
+        "R-ELEC-014",
+        "R-ELEC-015",
+        "R-ELEC-016"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-CMN-005",
+      "category": "common",
+      "group": "Change control",
+      "attribute_name": "material_or_design_change",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no"
+      ],
+      "why_it_matters": "A compliance-affecting material, design, process, supplier, or factory change may require new testing or authorization review.",
+      "triggered_rule_ids": [
+        "R-TOY-015",
+        "R-ELEC-013"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-CMN-006",
+      "category": "common",
+      "group": "Origin marking",
+      "attribute_name": "substantial_transformation_basis",
+      "data_type": "structured_text",
+      "allowed_values": [],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-CMN-001 (Country-of-origin marking).",
+      "triggered_rule_ids": [
+        "R-CMN-001"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-CMN-007",
+      "category": "common",
+      "group": "Origin marking",
+      "attribute_name": "marking_location",
+      "data_type": "text",
+      "allowed_values": [],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-CMN-001 (Country-of-origin marking).",
+      "triggered_rule_ids": [
+        "R-CMN-001"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-CMN-008",
+      "category": "common",
+      "group": "Origin marking",
+      "attribute_name": "marking_exception_claim",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no",
+        "unknown"
+      ],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-CMN-001 (Country-of-origin marking).",
+      "triggered_rule_ids": [
+        "R-CMN-001"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-CMN-009",
+      "category": "common",
+      "group": "California market",
+      "attribute_name": "business_employee_count",
+      "data_type": "integer",
+      "allowed_values": [
+        "0 and above"
+      ],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-CMN-002 (California Proposition 65 exposure warning screen).",
+      "triggered_rule_ids": [
+        "R-CMN-002"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-CMN-010",
+      "category": "common",
+      "group": "California market",
+      "attribute_name": "prop65_listed_chemical_or_exposure_flag",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no",
+        "unknown"
+      ],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-CMN-002 (California Proposition 65 exposure warning screen).",
+      "triggered_rule_ids": [
+        "R-CMN-002"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-CMN-011",
+      "category": "common",
+      "group": "California market",
+      "attribute_name": "safe_harbor_assessment",
+      "data_type": "structured_text",
+      "allowed_values": [],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-CMN-002 (California Proposition 65 exposure warning screen).",
+      "triggered_rule_ids": [
+        "R-CMN-002"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-CMN-012",
+      "category": "common",
+      "group": "Platform",
+      "attribute_name": "amazon_store_country",
+      "data_type": "text",
+      "allowed_values": [],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-TOY-019 (Amazon annual toy compliance verification).",
+      "triggered_rule_ids": [
+        "R-TOY-019"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-CMN-013",
+      "category": "common",
+      "group": "Platform",
+      "attribute_name": "asin",
+      "data_type": "text",
+      "allowed_values": [],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-TOY-019, R-ELEC-015 (Amazon annual toy compliance verification; Amazon rechargeable lithium-ion battery compliance verification).",
+      "triggered_rule_ids": [
+        "R-TOY-019",
+        "R-ELEC-015"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-CMN-014",
+      "category": "common",
+      "group": "Platform",
+      "attribute_name": "amazon_compliance_notification",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no",
+        "unknown"
+      ],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-TOY-019, R-ELEC-015 (Amazon annual toy compliance verification; Amazon rechargeable lithium-ion battery compliance verification).",
+      "triggered_rule_ids": [
+        "R-TOY-019",
+        "R-ELEC-015"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-CMN-015",
+      "category": "common",
+      "group": "Evidence",
+      "attribute_name": "existing_report_date",
+      "data_type": "date",
+      "allowed_values": [],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-TOY-019 (Amazon annual toy compliance verification).",
+      "triggered_rule_ids": [
+        "R-TOY-019"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-CMN-016",
+      "category": "common",
+      "group": "Platform",
+      "attribute_name": "recall_or_platform_prohibition_match",
+      "data_type": "enum",
+      "allowed_values": [
+        "clear",
+        "match",
+        "uncertain"
+      ],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-TOY-020, R-ELEC-016 (eBay product safety restrictions; eBay electronic-equipment and product-safety restrictions).",
+      "triggered_rule_ids": [
+        "R-TOY-020",
+        "R-ELEC-016"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-001",
+      "category": "small_consumer_electronics",
+      "group": "Classification",
+      "attribute_name": "child_targeted_electronics",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no",
+        "uncertain"
+      ],
+      "why_it_matters": "Child-targeted electronics may be children's products or toys and must not be routed solely through the electronics rules.",
+      "triggered_rule_ids": [
+        "R-ELEC-001",
+        "R-TOY-001",
+        "R-TOY-014"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-002",
+      "category": "small_consumer_electronics",
+      "group": "RF and EMC",
+      "attribute_name": "intentional_rf_transmitter",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no",
+        "unknown"
+      ],
+      "why_it_matters": "Bluetooth, Wi-Fi, cellular, NFC, or other intentional RF generally triggers FCC certification before marketing.",
+      "triggered_rule_ids": [
+        "R-ELEC-002",
+        "R-ELEC-004",
+        "R-ELEC-006",
+        "R-ELEC-007",
+        "R-ELEC-014",
+        "R-ELEC-016"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-003",
+      "category": "small_consumer_electronics",
+      "group": "RF and EMC",
+      "attribute_name": "radio_protocols_and_bands",
+      "data_type": "structured_list",
+      "allowed_values": [
+        "Bluetooth, Wi-Fi, NFC, cellular, proprietary; frequencies"
+      ],
+      "why_it_matters": "Selects the applicable Part 15 or licensed-service technical rules and test plan.",
+      "triggered_rule_ids": [
+        "R-ELEC-002",
+        "R-ELEC-007",
+        "R-ELEC-008",
+        "R-ELEC-009"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-004",
+      "category": "small_consumer_electronics",
+      "group": "RF and EMC",
+      "attribute_name": "digital_device_or_peripheral",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no"
+      ],
+      "why_it_matters": "Digital devices and peripherals are generally unintentional radiators subject to Part 15 Subpart B unless exempt.",
+      "triggered_rule_ids": [
+        "R-ELEC-003",
+        "R-ELEC-004",
+        "R-ELEC-005",
+        "R-ELEC-006",
+        "R-ELEC-014",
+        "R-ELEC-016"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-005",
+      "category": "small_consumer_electronics",
+      "group": "RF and EMC",
+      "attribute_name": "highest_generated_or_used_frequency_mhz",
+      "data_type": "number",
+      "allowed_values": [
+        "MHz"
+      ],
+      "why_it_matters": "Needed for FCC digital-device classification and exemption screening.",
+      "triggered_rule_ids": [
+        "R-ELEC-003",
+        "R-ELEC-004"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-006",
+      "category": "small_consumer_electronics",
+      "group": "RF and EMC",
+      "attribute_name": "power_during_operation",
+      "data_type": "multi_select",
+      "allowed_values": [
+        "battery only",
+        "USB",
+        "AC adapter",
+        "mains",
+        "operates while charging"
+      ],
+      "why_it_matters": "Battery-only status and ability to operate while charging affect FCC conducted-emissions exemptions.",
+      "triggered_rule_ids": [
+        "R-ELEC-004",
+        "R-ELEC-010",
+        "R-ELEC-011",
+        "R-ELEC-003"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-007",
+      "category": "small_consumer_electronics",
+      "group": "RF and EMC",
+      "attribute_name": "radio_module_status",
+      "data_type": "enum",
+      "allowed_values": [
+        "fully certified module",
+        "limited modular approval",
+        "custom radio",
+        "unknown"
+      ],
+      "why_it_matters": "A certified module may reduce transmitter testing, but host integration, emissions, RF exposure, labeling, and grant conditions still require review.",
+      "triggered_rule_ids": [
+        "R-ELEC-009",
+        "R-ELEC-002"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-008",
+      "category": "small_consumer_electronics",
+      "group": "RF and EMC",
+      "attribute_name": "module_fcc_id_and_grant_conditions",
+      "data_type": "structured_text",
+      "allowed_values": [
+        "FCC ID, antennas, power, host restrictions, co-location conditions"
+      ],
+      "why_it_matters": "Determines whether the intended host installation is covered by the module authorization.",
+      "triggered_rule_ids": [
+        "R-ELEC-009",
+        "R-ELEC-002"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-009",
+      "category": "small_consumer_electronics",
+      "group": "RF exposure",
+      "attribute_name": "minimum_body_separation_cm",
+      "data_type": "number",
+      "allowed_values": [
+        "0 and above"
+      ],
+      "why_it_matters": "Below 20 cm is portable-device analysis; at least 20 cm is mobile-device analysis, subject to actual use configuration.",
+      "triggered_rule_ids": [
+        "R-ELEC-007",
+        "R-ELEC-008",
+        "R-ELEC-002",
+        "R-ELEC-009"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-010",
+      "category": "small_consumer_electronics",
+      "group": "RF exposure",
+      "attribute_name": "simultaneous_transmitters",
+      "data_type": "integer",
+      "allowed_values": [
+        "0 and above"
+      ],
+      "why_it_matters": "Multiple simultaneous RF sources require an aggregate exemption or exposure evaluation.",
+      "triggered_rule_ids": [
+        "R-ELEC-007",
+        "R-ELEC-008",
+        "R-ELEC-002",
+        "R-ELEC-009"
+      ],
+      "mvp_priority": "P1",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-011",
+      "category": "small_consumer_electronics",
+      "group": "Battery",
+      "attribute_name": "battery_chemistry",
+      "data_type": "enum",
+      "allowed_values": [
+        "lithium ion",
+        "lithium metal",
+        "nickel metal hydride",
+        "alkaline",
+        "other",
+        "none"
+      ],
+      "why_it_matters": "Lithium chemistries trigger UN 38.3 and hazardous-material transport controls; button/coin geometry triggers separate product rules.",
+      "triggered_rule_ids": [
+        "R-ELEC-012",
+        "R-ELEC-017",
+        "R-ELEC-011",
+        "R-ELEC-015",
+        "R-ELEC-016"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-012",
+      "category": "small_consumer_electronics",
+      "group": "Battery",
+      "attribute_name": "lithium_battery_configuration",
+      "data_type": "enum",
+      "allowed_values": [
+        "contained in equipment",
+        "packed with equipment",
+        "battery alone",
+        "spare",
+        "none"
+      ],
+      "why_it_matters": "Packaging, marks, quantity limits, and carrier rules depend on configuration.",
+      "triggered_rule_ids": [
+        "R-ELEC-012",
+        "R-ELEC-015",
+        "R-ELEC-016"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-013",
+      "category": "small_consumer_electronics",
+      "group": "Battery",
+      "attribute_name": "lithium_ion_watt_hours",
+      "data_type": "number",
+      "allowed_values": [
+        "Wh"
+      ],
+      "why_it_matters": "Determines small-battery exceptions and required battery marking; 20 Wh cell and 100 Wh battery thresholds are central transport fields.",
+      "triggered_rule_ids": [
+        "R-ELEC-012",
+        "R-ELEC-015"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-014",
+      "category": "small_consumer_electronics",
+      "group": "Battery",
+      "attribute_name": "lithium_metal_content_grams",
+      "data_type": "number",
+      "allowed_values": [
+        "grams"
+      ],
+      "why_it_matters": "Determines small lithium-metal cell/battery transport exceptions.",
+      "triggered_rule_ids": [
+        "R-ELEC-012"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-015",
+      "category": "small_consumer_electronics",
+      "group": "Battery",
+      "attribute_name": "un38_3_test_summary_available",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no",
+        "unknown"
+      ],
+      "why_it_matters": "Manufacturers and subsequent distributors generally must make a compliant UN 38.3 test summary available.",
+      "triggered_rule_ids": [
+        "R-ELEC-012",
+        "R-ELEC-015"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-016",
+      "category": "small_consumer_electronics",
+      "group": "Battery",
+      "attribute_name": "button_or_coin_cell",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no"
+      ],
+      "why_it_matters": "Non-toy products containing or designed to use button/coin cells trigger 16 CFR part 1263, except zinc-air cells.",
+      "triggered_rule_ids": [
+        "R-ELEC-017",
+        "R-ELEC-015",
+        "R-ELEC-016"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-017",
+      "category": "common",
+      "group": "Battery",
+      "attribute_name": "button_cell_geometry_and_chemistry",
+      "data_type": "structured_text",
+      "allowed_values": [
+        "diameter, height, chemistry, model"
+      ],
+      "why_it_matters": "Determines part 1263 scope and zinc-air exclusion. Canonicalized for both toy and non-toy button/coin-cell routing.",
+      "triggered_rule_ids": [
+        "R-ELEC-017",
+        "R-TOY-012"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-018",
+      "category": "small_consumer_electronics",
+      "group": "Power",
+      "attribute_name": "external_power_supply_included_or_sold",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no"
+      ],
+      "why_it_matters": "Covered external power supplies trigger DOE efficiency testing, certification, and Level VI marking unless an exception applies.",
+      "triggered_rule_ids": [
+        "R-ELEC-010"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-019",
+      "category": "small_consumer_electronics",
+      "group": "Power",
+      "attribute_name": "battery_charger_function",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no"
+      ],
+      "why_it_matters": "Covered battery chargers trigger DOE unit-energy-consumption testing and certification unless excluded.",
+      "triggered_rule_ids": [
+        "R-ELEC-011"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-020",
+      "category": "small_consumer_electronics",
+      "group": "Power",
+      "attribute_name": "mains_connection_and_rating",
+      "data_type": "structured_text",
+      "allowed_values": [
+        "input voltage/frequency/current; plug; class"
+      ],
+      "why_it_matters": "Routes electrical-shock/fire testing and product-specific safety standards; no universal federal UL listing rule was verified for this category.",
+      "triggered_rule_ids": [
+        "R-ELEC-010",
+        "R-ELEC-018",
+        "R-TOY-013"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-021",
+      "category": "small_consumer_electronics",
+      "group": "Supply chain",
+      "attribute_name": "fcc_covered_list_screen",
+      "data_type": "enum",
+      "allowed_values": [
+        "clear",
+        "match",
+        "uncertain"
+      ],
+      "why_it_matters": "FCC authorization is prohibited for covered equipment; applicant and supply-chain screening is required for certification workflows.",
+      "triggered_rule_ids": [
+        "R-ELEC-013",
+        "R-ELEC-002",
+        "R-ELEC-016"
+      ],
+      "mvp_priority": "P1",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-022",
+      "category": "small_consumer_electronics",
+      "group": "RF and EMC",
+      "attribute_name": "residential_or_business_environment",
+      "data_type": "enum",
+      "allowed_values": [
+        "residential",
+        "business/commercial",
+        "both",
+        "unknown"
+      ],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-ELEC-003 (FCC authorization for unintentional radiators).",
+      "triggered_rule_ids": [
+        "R-ELEC-003"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-023",
+      "category": "small_consumer_electronics",
+      "group": "FCC authorization",
+      "attribute_name": "fcc_authorization_path",
+      "data_type": "enum",
+      "allowed_values": [
+        "certification",
+        "SDoC",
+        "no authorization required",
+        "unknown"
+      ],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-ELEC-005, R-ELEC-006, R-ELEC-014 (FCC Supplier's Declaration of Conformity responsible party and compliance information; FCC product labels and user information; Amazon FCC radio-frequency-device listing attributes).",
+      "triggered_rule_ids": [
+        "R-ELEC-005",
+        "R-ELEC-006",
+        "R-ELEC-014"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-024",
+      "category": "small_consumer_electronics",
+      "group": "FCC authorization",
+      "attribute_name": "us_responsible_party_identity",
+      "data_type": "structured_text",
+      "allowed_values": [],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-ELEC-005, R-ELEC-014 (FCC Supplier's Declaration of Conformity responsible party and compliance information; Amazon FCC radio-frequency-device listing attributes).",
+      "triggered_rule_ids": [
+        "R-ELEC-005",
+        "R-ELEC-014"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-025",
+      "category": "small_consumer_electronics",
+      "group": "FCC authorization",
+      "attribute_name": "fcc_id",
+      "data_type": "text",
+      "allowed_values": [],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-ELEC-006, R-ELEC-014 (FCC product labels and user information; Amazon FCC radio-frequency-device listing attributes).",
+      "triggered_rule_ids": [
+        "R-ELEC-006",
+        "R-ELEC-014"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-026",
+      "category": "small_consumer_electronics",
+      "group": "RF and EMC",
+      "attribute_name": "class_a_or_b",
+      "data_type": "enum",
+      "allowed_values": [
+        "Class A",
+        "Class B",
+        "unknown"
+      ],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-ELEC-006 (FCC product labels and user information).",
+      "triggered_rule_ids": [
+        "R-ELEC-006"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-027",
+      "category": "small_consumer_electronics",
+      "group": "Labeling",
+      "attribute_name": "label_space_or_e_label",
+      "data_type": "enum",
+      "allowed_values": [
+        "physical label",
+        "electronic label",
+        "space limitation claimed",
+        "unknown"
+      ],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-ELEC-006 (FCC product labels and user information).",
+      "triggered_rule_ids": [
+        "R-ELEC-006"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-028",
+      "category": "small_consumer_electronics",
+      "group": "RF exposure",
+      "attribute_name": "conducted_or_radiated_power",
+      "data_type": "structured_list",
+      "allowed_values": [],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-ELEC-007 (FCC RF exposure evaluation for portable devices).",
+      "triggered_rule_ids": [
+        "R-ELEC-007"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-029",
+      "category": "small_consumer_electronics",
+      "group": "RF exposure",
+      "attribute_name": "antenna_gain",
+      "data_type": "structured_list",
+      "allowed_values": [],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-ELEC-007 (FCC RF exposure evaluation for portable devices).",
+      "triggered_rule_ids": [
+        "R-ELEC-007"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-030",
+      "category": "small_consumer_electronics",
+      "group": "RF exposure",
+      "attribute_name": "duty_cycle",
+      "data_type": "number",
+      "allowed_values": [
+        "percent or ratio"
+      ],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-ELEC-007 (FCC RF exposure evaluation for portable devices).",
+      "triggered_rule_ids": [
+        "R-ELEC-007"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-031",
+      "category": "small_consumer_electronics",
+      "group": "Power",
+      "attribute_name": "eps_output_type_and_power",
+      "data_type": "structured_text",
+      "allowed_values": [],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-ELEC-010 (DOE external power supply energy conservation).",
+      "triggered_rule_ids": [
+        "R-ELEC-010"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-032",
+      "category": "small_consumer_electronics",
+      "group": "Power",
+      "attribute_name": "eps_exception_claim",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no",
+        "unknown"
+      ],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-ELEC-010 (DOE external power supply energy conservation).",
+      "triggered_rule_ids": [
+        "R-ELEC-010"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-033",
+      "category": "small_consumer_electronics",
+      "group": "Battery charger",
+      "attribute_name": "rated_battery_energy",
+      "data_type": "number",
+      "allowed_values": [
+        "source-rated energy value"
+      ],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-ELEC-011 (DOE battery charger energy conservation).",
+      "triggered_rule_ids": [
+        "R-ELEC-011"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-034",
+      "category": "small_consumer_electronics",
+      "group": "Battery charger",
+      "attribute_name": "medical_device_exclusion",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no",
+        "unknown"
+      ],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-ELEC-011 (DOE battery charger energy conservation).",
+      "triggered_rule_ids": [
+        "R-ELEC-011"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-035",
+      "category": "small_consumer_electronics",
+      "group": "Battery transport",
+      "attribute_name": "package_quantity",
+      "data_type": "integer",
+      "allowed_values": [
+        "0 and above"
+      ],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-ELEC-012 (Lithium battery UN 38.3 and US transport controls).",
+      "triggered_rule_ids": [
+        "R-ELEC-012"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-036",
+      "category": "small_consumer_electronics",
+      "group": "FCC authorization",
+      "attribute_name": "no_authorization_basis",
+      "data_type": "structured_text",
+      "allowed_values": [],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-ELEC-014 (Amazon FCC radio-frequency-device listing attributes).",
+      "triggered_rule_ids": [
+        "R-ELEC-014"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-037",
+      "category": "small_consumer_electronics",
+      "group": "Platform",
+      "attribute_name": "e_mobility_exclusion",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no",
+        "unknown"
+      ],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-ELEC-015 (Amazon rechargeable lithium-ion battery compliance verification).",
+      "triggered_rule_ids": [
+        "R-ELEC-015"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-038",
+      "category": "small_consumer_electronics",
+      "group": "Battery",
+      "attribute_name": "loose_18650_cell",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no",
+        "unknown"
+      ],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-ELEC-016 (eBay electronic-equipment and product-safety restrictions).",
+      "triggered_rule_ids": [
+        "R-ELEC-016"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-039",
+      "category": "small_consumer_electronics",
+      "group": "Battery",
+      "attribute_name": "zinc_air_cell",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no",
+        "unknown"
+      ],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-ELEC-017 (Button/coin battery product performance and warnings).",
+      "triggered_rule_ids": [
+        "R-ELEC-017"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-040",
+      "category": "small_consumer_electronics",
+      "group": "Battery",
+      "attribute_name": "installed_or_separately_packaged",
+      "data_type": "enum",
+      "allowed_values": [
+        "installed",
+        "separately packaged",
+        "both",
+        "unknown"
+      ],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-ELEC-017 (Button/coin battery product performance and warnings).",
+      "triggered_rule_ids": [
+        "R-ELEC-017"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-ELEC-041",
+      "category": "small_consumer_electronics",
+      "group": "Classification",
+      "attribute_name": "toy_compliance_path",
+      "data_type": "enum",
+      "allowed_values": [
+        "toy path",
+        "non-toy path",
+        "uncertain"
+      ],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-ELEC-017 (Button/coin battery product performance and warnings).",
+      "triggered_rule_ids": [
+        "R-ELEC-017"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-001",
+      "category": "childrens_toys",
+      "group": "Age and intent",
+      "attribute_name": "intended_min_age_months",
+      "data_type": "integer",
+      "allowed_values": [
+        "0 and above"
+      ],
+      "why_it_matters": "Age drives child-product status, small-parts bans, warnings, and age-specific ASTM F963 sections.",
+      "triggered_rule_ids": [
+        "R-TOY-001",
+        "R-TOY-007",
+        "R-TOY-008",
+        "R-TOY-002",
+        "R-TOY-003",
+        "R-TOY-006",
+        "R-TOY-010",
+        "R-TOY-011",
+        "R-ELEC-001"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-002",
+      "category": "childrens_toys",
+      "group": "Age and intent",
+      "attribute_name": "intended_max_age_years",
+      "data_type": "decimal",
+      "allowed_values": [
+        "0 to 14+"
+      ],
+      "why_it_matters": "Toys are generally playthings for children under 14; CPSC children's-product testing applies through age 12.",
+      "triggered_rule_ids": [
+        "R-TOY-001",
+        "R-TOY-002",
+        "R-TOY-003",
+        "R-TOY-006",
+        "R-TOY-008",
+        "R-ELEC-001"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-003",
+      "category": "childrens_toys",
+      "group": "Age and intent",
+      "attribute_name": "child_appeal_factors",
+      "data_type": "multi_select",
+      "allowed_values": [
+        "labeling",
+        "packaging",
+        "advertising",
+        "size",
+        "theme",
+        "play value",
+        "customary recognition"
+      ],
+      "why_it_matters": "CPSC classification uses multiple factors; an age label alone does not control.",
+      "triggered_rule_ids": [
+        "R-TOY-001",
+        "R-ELEC-001",
+        "R-TOY-003"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-004",
+      "category": "childrens_toys",
+      "group": "Mechanical",
+      "attribute_name": "small_part_as_received",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no",
+        "unknown"
+      ],
+      "why_it_matters": "A small part in a product for children under three may make the product a banned hazardous substance.",
+      "triggered_rule_ids": [
+        "R-TOY-007",
+        "R-TOY-002",
+        "R-TOY-008"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-005",
+      "category": "childrens_toys",
+      "group": "Mechanical",
+      "attribute_name": "small_part_after_use_abuse",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no",
+        "unknown"
+      ],
+      "why_it_matters": "Use-and-abuse testing can liberate small components and trigger failure or warnings.",
+      "triggered_rule_ids": [
+        "R-TOY-007",
+        "R-TOY-008",
+        "R-TOY-002",
+        "R-TOY-010",
+        "R-TOY-011"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-006",
+      "category": "childrens_toys",
+      "group": "Mechanical",
+      "attribute_name": "small_ball_marble_balloon",
+      "data_type": "multi_select",
+      "allowed_values": [
+        "small ball",
+        "marble",
+        "latex balloon",
+        "none"
+      ],
+      "why_it_matters": "These product forms have separate ban or warning rules beyond the general small-parts rule.",
+      "triggered_rule_ids": [
+        "R-TOY-009",
+        "R-TOY-008"
+      ],
+      "mvp_priority": "P1",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-007",
+      "category": "childrens_toys",
+      "group": "Materials",
+      "attribute_name": "accessible_components",
+      "data_type": "structured_list",
+      "allowed_values": [
+        "component name, material, accessibility, color, supplier"
+      ],
+      "why_it_matters": "Lead and phthalate testing is component- and accessibility-dependent.",
+      "triggered_rule_ids": [
+        "R-TOY-004",
+        "R-TOY-005",
+        "R-TOY-006",
+        "R-TOY-002"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-008",
+      "category": "childrens_toys",
+      "group": "Materials",
+      "attribute_name": "surface_coating_present",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no",
+        "unknown"
+      ],
+      "why_it_matters": "Paint and similar surface coatings trigger the 90 ppm lead-in-paint rule and ASTM soluble-metals provisions.",
+      "triggered_rule_ids": [
+        "R-TOY-002",
+        "R-TOY-005"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-009",
+      "category": "childrens_toys",
+      "group": "Materials",
+      "attribute_name": "coating_type_and_color",
+      "data_type": "structured_list",
+      "allowed_values": [
+        "paint, lacquer, ink, electroplate, glaze; color"
+      ],
+      "why_it_matters": "Determines whether a material is a surface coating and helps define homogeneous test specimens.",
+      "triggered_rule_ids": [
+        "R-TOY-005"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-010",
+      "category": "childrens_toys",
+      "group": "Materials",
+      "attribute_name": "plasticized_component_present",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no",
+        "unknown"
+      ],
+      "why_it_matters": "Accessible plasticized components trigger the eight-phthalate limit and testing analysis.",
+      "triggered_rule_ids": [
+        "R-TOY-006",
+        "R-TOY-002"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-011",
+      "category": "childrens_toys",
+      "group": "Materials",
+      "attribute_name": "material_testing_determination",
+      "data_type": "enum",
+      "allowed_values": [
+        "must test",
+        "determination/exemption candidate",
+        "inaccessible",
+        "unknown"
+      ],
+      "why_it_matters": "Certain untreated natural materials, paper, and specified materials may not require third-party testing, but still must comply and be cited on the CPC.",
+      "triggered_rule_ids": [
+        "R-TOY-003",
+        "R-TOY-004",
+        "R-TOY-006"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-012",
+      "category": "childrens_toys",
+      "group": "Magnets",
+      "attribute_name": "magnet_present",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no"
+      ],
+      "why_it_matters": "Routes to ASTM F963 magnet requirements for toys; the general magnet rule expressly exempts compliant toys.",
+      "triggered_rule_ids": [
+        "R-TOY-010",
+        "R-TOY-002",
+        "R-TOY-020"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-013",
+      "category": "childrens_toys",
+      "group": "Magnets",
+      "attribute_name": "magnet_small_and_loose_or_separable",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no",
+        "unknown"
+      ],
+      "why_it_matters": "Small, loose or liberated high-powered magnets are the principal ingestion trigger.",
+      "triggered_rule_ids": [
+        "R-TOY-010",
+        "R-TOY-020"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-014",
+      "category": "childrens_toys",
+      "group": "Magnets",
+      "attribute_name": "magnet_flux_index",
+      "data_type": "number",
+      "allowed_values": [
+        "kG² mm² or unknown"
+      ],
+      "why_it_matters": "Needed to assess high-powered magnet thresholds and test results.",
+      "triggered_rule_ids": [
+        "R-TOY-010"
+      ],
+      "mvp_priority": "P1",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-015",
+      "category": "childrens_toys",
+      "group": "Batteries",
+      "attribute_name": "battery_operated",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no"
+      ],
+      "why_it_matters": "Triggers ASTM F963 section 4.25 and battery-accessibility evaluation.",
+      "triggered_rule_ids": [
+        "R-TOY-011",
+        "R-TOY-002"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-016",
+      "category": "childrens_toys",
+      "group": "Batteries",
+      "attribute_name": "button_or_coin_cell",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no"
+      ],
+      "why_it_matters": "Toy button/coin cells are routed through ASTM F963 battery requirements; separately packaged included cells add packaging duties.",
+      "triggered_rule_ids": [
+        "R-TOY-011",
+        "R-TOY-012",
+        "R-TOY-020"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-017",
+      "category": "childrens_toys",
+      "group": "Batteries",
+      "attribute_name": "battery_replaceability_and_access",
+      "data_type": "enum",
+      "allowed_values": [
+        "not replaceable",
+        "tool access",
+        "two independent actions",
+        "directly accessible",
+        "unknown"
+      ],
+      "why_it_matters": "Determines compartment security and whether the battery is accessible after use-and-abuse tests.",
+      "triggered_rule_ids": [
+        "R-TOY-011",
+        "R-TOY-012"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-018",
+      "category": "childrens_toys",
+      "group": "Batteries",
+      "attribute_name": "battery_packaged_separately_with_product",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no"
+      ],
+      "why_it_matters": "A separately packaged button/coin cell included with the toy triggers battery-package labeling and special-packaging analysis.",
+      "triggered_rule_ids": [
+        "R-TOY-012"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-019",
+      "category": "childrens_toys",
+      "group": "Electrical",
+      "attribute_name": "powered_from_120v_branch_circuit",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no"
+      ],
+      "why_it_matters": "Direct 110–125 V operation triggers 16 CFR part 1505; circuits at 30 V rms or less are excluded from that definition.",
+      "triggered_rule_ids": [
+        "R-TOY-013",
+        "R-TOY-002"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-020",
+      "category": "childrens_toys",
+      "group": "Specialty",
+      "attribute_name": "toy_feature_types",
+      "data_type": "multi_select",
+      "allowed_values": [
+        "sound",
+        "projectile",
+        "ride-on",
+        "crib/playpen attachment",
+        "teether",
+        "rattle",
+        "squeeze",
+        "stuffed/beanbag",
+        "toy chest",
+        "other"
+      ],
+      "why_it_matters": "Routes to specific ASTM F963 sections; the MVP should not assume the common mechanical sections are exhaustive.",
+      "triggered_rule_ids": [
+        "R-TOY-002"
+      ],
+      "mvp_priority": "P1",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-021",
+      "category": "childrens_toys",
+      "group": "Specialty",
+      "attribute_name": "water_bead_or_expanding_polymer",
+      "data_type": "enum",
+      "allowed_values": [
+        "water bead toy",
+        "contained water beads",
+        "other expanding material",
+        "none"
+      ],
+      "why_it_matters": "Water-bead toys now have specific federal size, acrylamide, warning, and instructional requirements.",
+      "triggered_rule_ids": [
+        "R-TOY-017",
+        "R-TOY-020"
+      ],
+      "mvp_priority": "P1",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-022",
+      "category": "childrens_toys",
+      "group": "Specialty",
+      "attribute_name": "neck_float",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no"
+      ],
+      "why_it_matters": "Neck floats intended for children through age four have federal conditioning, buoyancy, restraint, fit, warning, and manual rules effective in 2026.",
+      "triggered_rule_ids": [
+        "R-TOY-018"
+      ],
+      "mvp_priority": "P1",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-023",
+      "category": "childrens_toys",
+      "group": "Production",
+      "attribute_name": "continuous_production",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no"
+      ],
+      "why_it_matters": "Continuous production activates periodic testing plans and recordkeeping after initial certification.",
+      "triggered_rule_ids": [
+        "R-TOY-016"
+      ],
+      "mvp_priority": "P1",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-024",
+      "category": "childrens_toys",
+      "group": "Classification",
+      "attribute_name": "applicable_children_product_rules",
+      "data_type": "multi_select",
+      "allowed_values": [],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-TOY-003 (CPSC-accepted third-party testing and Children's Product Certificate).",
+      "triggered_rule_ids": [
+        "R-TOY-003"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-025",
+      "category": "childrens_toys",
+      "group": "Mechanical",
+      "attribute_name": "part1501_exclusion_claim",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no",
+        "unknown"
+      ],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-TOY-007 (Small-parts ban for children under three).",
+      "triggered_rule_ids": [
+        "R-TOY-007"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-026",
+      "category": "childrens_toys",
+      "group": "Electrical",
+      "attribute_name": "circuit_voltage_rms",
+      "data_type": "number",
+      "allowed_values": [
+        "volts RMS"
+      ],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-TOY-013 (Electrically operated toys powered from household circuits).",
+      "triggered_rule_ids": [
+        "R-TOY-013"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-027",
+      "category": "childrens_toys",
+      "group": "Classification",
+      "attribute_name": "children_product_classification_confirmed",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no",
+        "unknown"
+      ],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-TOY-014 (Tracking labels).",
+      "triggered_rule_ids": [
+        "R-TOY-014"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-028",
+      "category": "childrens_toys",
+      "group": "Change control",
+      "attribute_name": "changed_element",
+      "data_type": "structured_list",
+      "allowed_values": [],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-TOY-015 (Material-change testing and recertification).",
+      "triggered_rule_ids": [
+        "R-TOY-015"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    },
+    {
+      "attribute_id": "A-TOY-029",
+      "category": "childrens_toys",
+      "group": "Change control",
+      "attribute_name": "factory_or_component_source_change",
+      "data_type": "boolean",
+      "allowed_values": [
+        "yes",
+        "no",
+        "unknown"
+      ],
+      "why_it_matters": "Required by the approved P0 clarification mapping for R-TOY-015 (Material-change testing and recertification).",
+      "triggered_rule_ids": [
+        "R-TOY-015"
+      ],
+      "mvp_priority": "P0",
+      "evidence_status": "VERIFIED"
+    }
+  ]
+}
