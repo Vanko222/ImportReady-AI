@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -25,7 +26,7 @@ from src.services.classification import (
     CategoryStatus,
     Classifier,
 )
-from src.state import AnalysisStatus, CaseState
+from src.state import AnalysisStatus, CaseState, ProductFact
 
 logger = logging.getLogger("importready.orchestrator")
 
@@ -112,10 +113,13 @@ class Orchestrator:
         self,
         product_description: str,
         provided_category: str | None = None,
-        provided_attribute_ids: list[str] | None = None,
+        product_facts: Sequence[ProductFact] | None = None,
         agent_runner: AgentRunner | None = None,
     ) -> OrchestratorOutcome:
-        context = self._new_context(product_description)
+        # One truth source for canonical facts: ProductFact values. ``None``
+        # normalizes to an empty request fact collection.
+        facts = list(product_facts or [])
+        context = self._new_context(product_description, facts)
 
         try:
             category_result = self._classifier.classify(product_description, provided_category)
@@ -138,7 +142,7 @@ class Orchestrator:
             CategoryStatus.NEEDS_INFO,
             CategoryStatus.UNSUPPORTED,
         ):
-            analysis = self._analysis_service.analyze(category_result, provided_attribute_ids)
+            analysis = self._analysis_service.analyze(category_result, facts)
             self._populate_case(context.case, analysis)
             return OrchestratorOutcome(
                 request_id=context.request_id,
@@ -152,7 +156,7 @@ class Orchestrator:
 
         if agent_runner is None:
             # Offline deterministic path: clearly labelled, never an Agent demo.
-            analysis = self._analysis_service.analyze(category_result, provided_attribute_ids)
+            analysis = self._analysis_service.analyze(category_result, facts)
             self._populate_case(context.case, analysis)
             return OrchestratorOutcome(
                 request_id=context.request_id,
@@ -197,7 +201,7 @@ class Orchestrator:
 
         # Agent failed / hit a limit / never called the required tool.
         # Run the deterministic fallback explicitly labelled as REVIEW_REQUIRED.
-        fallback = self._analysis_service.analyze(category_result, provided_attribute_ids)
+        fallback = self._analysis_service.analyze(category_result, facts)
         self._mark_fallback(fallback, run_outcome)
         self._populate_case(context.case, fallback)
         error_type = run_outcome.error_type or "agent_runtime_failure"
@@ -254,8 +258,12 @@ class Orchestrator:
         if "human_review_required" not in analysis.review.reviewer_actions:
             analysis.review.reviewer_actions.append("human_review_required")
 
-    def _new_context(self, product_description: str) -> RequestContext:
+    def _new_context(
+        self, product_description: str, product_facts: Sequence[ProductFact]
+    ) -> RequestContext:
         case = CaseState(raw_product_input=product_description)
+        # The human-boundary facts are the per-request canonical fact collection.
+        case.product_facts = list(product_facts)
         return RequestContext(
             request_id=f"req_{uuid.uuid4().hex}",
             created_at=_utc_now(),
@@ -263,9 +271,19 @@ class Orchestrator:
         )
 
     def _populate_case(self, case: CaseState, analysis: AnalysisResult) -> None:
-        case.missing_attribute_ids = [
-            item.attribute_id for item in analysis.unknown.missing_information
-        ]
+        if analysis.applicability is not None:
+            # Canonical, value-free rule results; never raw ProductFact values.
+            case.rule_results = [
+                result.model_dump(mode="json") for result in analysis.applicability.rules
+            ]
+            case.missing_attribute_ids = list(analysis.applicability.missing_attribute_ids)
+        else:
+            # No canonical applicability: never invent rule facts from an
+            # unconfirmed candidate category.
+            case.rule_results = []
+            case.missing_attribute_ids = [
+                item.attribute_id for item in analysis.unknown.missing_information
+            ]
         try:
             case.analysis_status = AnalysisStatus(analysis.review.status)
         except ValueError:

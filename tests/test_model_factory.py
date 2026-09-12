@@ -82,9 +82,9 @@ def test_deepseek_selection(monkeypatch: pytest.MonkeyPatch) -> None:
         "api_key": "test-api-key",
     }
     assert model.kwargs["model_id"] == "deepseek-flash"
-    assert model.kwargs["params"] == {
-        "extra_body": {"thinking": {"type": "disabled"}}
-    }
+    # The DeepSeek thinking/extra_body parameter is not supported by the API and
+    # must never be sent (it caused HTTP 400 Bad Request).
+    assert "params" not in model.kwargs
 
 
 def test_deepseek_missing_api_key_fails(monkeypatch: pytest.MonkeyPatch) -> None:

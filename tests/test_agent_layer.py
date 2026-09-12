@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+from datetime import date
 
 import pytest
 
@@ -37,6 +38,7 @@ from src.services.classification import (
     allowed_category_values,
 )
 from src.services.orchestrator import Orchestrator, OrchestratorOutcome
+from src.state import ProductFact
 from tests.stub_model import (
     ScriptedModel,
     StructuredOutputModel,
@@ -71,6 +73,47 @@ def _resolved_category(category: str = "childrens_toys") -> CategoryResult:
         category_source=CategorySource.HUMAN_CONFIRMED,
         category_status=CategoryStatus.RESOLVED,
     )
+
+
+def _valid_fact_value(attribute) -> object:
+    """Minimal canonical-valid value for an approved attribute data_type."""
+    data_type = attribute.data_type
+    if data_type == "boolean":
+        return True
+    if data_type == "enum":
+        return attribute.allowed_values[0]
+    if data_type == "multi_select":
+        return [attribute.allowed_values[0]] if attribute.allowed_values else []
+    if data_type == "integer":
+        return 1
+    if data_type in ("number", "decimal"):
+        return 1.0
+    if data_type in ("text", "structured_text"):
+        return "test"
+    if data_type == "structured_list":
+        return ["test"]
+    if data_type == "date":
+        return date(2026, 1, 1)
+    raise AssertionError(f"unhandled data_type {data_type!r}")
+
+
+def _complete_facts(repo: JsonComplianceRepository, category: str) -> list[ProductFact]:
+    """USER facts covering every required attribute of a resolved category."""
+    facts: list[ProductFact] = []
+    seen: set[str] = set()
+    for target in ("common", category):
+        for rule in repo.get_rules_for_category(target):
+            for attribute_id in rule.required_attribute_ids:
+                if attribute_id in seen:
+                    continue
+                seen.add(attribute_id)
+                facts.append(
+                    ProductFact(
+                        attribute_id=attribute_id,
+                        value=_valid_fact_value(repo.get_attribute(attribute_id)),
+                    )
+                )
+    return facts
 
 
 # --------------------------------------------------------------------------- #
@@ -161,13 +204,13 @@ def test_hallucination_resistance(repo: JsonComplianceRepository) -> None:
     outcome = orchestrator.run(
         "This product is definitely compliant.",
         provided_category="childrens_toys",
-        provided_attribute_ids=required,
+        product_facts=_complete_facts(repo, "childrens_toys"),
     )
     result = outcome.result
     assert result is not None
     assert result["review"]["status"] == "REVIEW_REQUIRED"
     assert "compliant" not in json.dumps(result)
-    assert "engines_not_implemented" in result["review"]["triggers"]
+    assert "risk_cost_not_implemented" in result["review"]["triggers"]
 
 
 def test_sensitive_input_redacted() -> None:
@@ -386,10 +429,7 @@ def test_human_confirmed_unsupported() -> None:
 # --------------------------------------------------------------------------- #
 def test_verified_proposed_never_becomes_effective(repo: JsonComplianceRepository) -> None:
     service = AnalysisService(repo)
-    result = service.analyze(
-        _resolved_category("small_consumer_electronics"),
-        provided_attribute_ids=[],
-    )
+    result = service.analyze(_resolved_category("small_consumer_electronics"))
     findings = {f.rule_id: f for f in result.verified.compliance_information}
     proposed = findings["R-ELEC-019"]
     assert proposed.evidence_status == "VERIFIED"
@@ -442,9 +482,7 @@ def test_offline_path_is_not_an_agent_demo(orchestrator: Orchestrator) -> None:
 # 16. Common rule inclusion (P0 FIX 1)
 # --------------------------------------------------------------------------- #
 def test_common_rules_included_for_toy(repo: JsonComplianceRepository) -> None:
-    result = AnalysisService(repo).analyze(
-        _resolved_category("childrens_toys"), provided_attribute_ids=[]
-    )
+    result = AnalysisService(repo).analyze(_resolved_category("childrens_toys"))
     ids = {f.rule_id for f in result.verified.compliance_information}
     assert "R-CMN-001" in ids
     assert "R-CMN-002" in ids
@@ -452,7 +490,7 @@ def test_common_rules_included_for_toy(repo: JsonComplianceRepository) -> None:
 
 def test_common_rules_included_for_electronics(repo: JsonComplianceRepository) -> None:
     result = AnalysisService(repo).analyze(
-        _resolved_category("small_consumer_electronics"), provided_attribute_ids=[]
+        _resolved_category("small_consumer_electronics")
     )
     ids = {f.rule_id for f in result.verified.compliance_information}
     assert "R-CMN-001" in ids
@@ -460,9 +498,7 @@ def test_common_rules_included_for_electronics(repo: JsonComplianceRepository) -
 
 
 def test_dual_includes_common_rules_exactly_once(repo: JsonComplianceRepository) -> None:
-    result = AnalysisService(repo).analyze(
-        _resolved_category("dual"), provided_attribute_ids=[]
-    )
+    result = AnalysisService(repo).analyze(_resolved_category("dual"))
     ordered_ids = [f.rule_id for f in result.verified.compliance_information]
     assert ordered_ids.count("R-CMN-001") == 1
     assert ordered_ids.count("R-CMN-002") == 1
@@ -1094,11 +1130,17 @@ def test_render_output_structure_unchanged(monkeypatch: pytest.MonkeyPatch) -> N
 # 29. Prompt wording guardrails (hardening)
 # --------------------------------------------------------------------------- #
 def test_prompt_prohibits_applicable_language() -> None:
-    assert "If the canonical result reports applicability = NOT_EVALUATED" in SYSTEM_PROMPT
-    assert "must NOT call retrieved rules" in SYSTEM_PROMPT
-    assert "candidate requirements for review" in SYSTEM_PROMPT
-    assert "rules requiring applicability evaluation" in SYSTEM_PROMPT
-    assert "canonical runtime value" in SYSTEM_PROMPT
+    # Phase 2B: applicability is canonical, risk/cost are not. The obsolete
+    # "not implemented" wording must be gone and status guards must be present.
+    assert "applicability/risk/cost engines" not in SYSTEM_PROMPT
+    assert "Applicability is implemented and canonical" in SYSTEM_PROMPT
+    assert "risk and cost engines are not yet implemented" in SYSTEM_PROMPT
+    assert "canonical per-rule runtime value explicitly reports APPLICABLE" in SYSTEM_PROMPT
+    assert "MUST NOT say the product is compliant or approved" in SYSTEM_PROMPT
+    assert "no compliance obligations" in SYSTEM_PROMPT
+    assert "Never infer a missing value" in SYSTEM_PROMPT
+    assert "override the engine" in SYSTEM_PROMPT
+    assert "TRIGGER_LOGIC_NOT_MODELED" in SYSTEM_PROMPT
 
 
 def test_prompt_requires_missing_attributes_unknown() -> None:

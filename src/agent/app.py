@@ -12,6 +12,8 @@ import logging
 import os
 import re
 import sys
+from datetime import date
+from pathlib import Path
 from typing import Any
 
 from src.repositories.compliance_repository import JsonComplianceRepository
@@ -22,6 +24,7 @@ from src.services.classification import (
     allowed_category_values,
 )
 from src.services.orchestrator import AgentRunOutcome, Orchestrator, OrchestratorOutcome
+from src.state import FactOrigin, ProductFact
 
 logger = logging.getLogger("importready")
 
@@ -99,6 +102,138 @@ def _extract_text(result: Any) -> str | None:
     return text or None
 
 
+# --------------------------------------------------------------------------- #
+# Human fact boundary (--facts-file)
+# --------------------------------------------------------------------------- #
+# The boundary performs ONLY JSON syntax/shape validation, USER provenance
+# assignment, date representation conversion, and sensitive-input scanning.
+# All data_type / value / duplicate / contradiction validation stays in the
+# accepted ApplicabilityEngine, which remains the single validation authority.
+
+_FACTS_FILE_UNREADABLE = "facts_file_unreadable"
+_FACTS_FILE_INVALID = "facts_file_invalid"
+_SENSITIVE_INPUT_DETECTED = "sensitive_input_detected"
+
+_FACTS_ERROR_MESSAGES: dict[str, str] = {
+    _FACTS_FILE_UNREADABLE: "unable to read facts file",
+    _FACTS_FILE_INVALID: "invalid facts file structure",
+    _SENSITIVE_INPUT_DETECTED: (
+        "remove credentials or tokens before submitting product information"
+    ),
+}
+
+# Exactly {"facts"} at the top level and exactly {"attribute_id", "value"} per
+# entry. This is what prevents a caller from declaring origin/confidence/
+# verified/source/status/evidence_status/category/rule_id.
+_FACTS_ALLOWED_TOP_LEVEL = frozenset({"facts"})
+_FACTS_ALLOWED_ENTRY_KEYS = frozenset({"attribute_id", "value"})
+
+# Strict date-only form. Anything else stays untouched so the engine can report
+# INVALID_FACT_VALUE rather than the boundary guessing or repairing.
+_DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+class _FactsFileError(Exception):
+    """Stable, sanitized facts-file failure; never carries raw payload."""
+
+    def __init__(self, error_type: str) -> None:
+        super().__init__(error_type)
+        self.error_type = error_type
+
+
+def _iter_structured_strings(value: Any):
+    """Yield every string anywhere in a parsed JSON-like structure."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from _iter_structured_strings(key)
+            yield from _iter_structured_strings(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_structured_strings(item)
+
+
+def _contains_sensitive_structured(value: Any) -> bool:
+    """Recursive sensitive-input scan, reusing the existing detector."""
+    return any(
+        _contains_sensitive_input(text) for text in _iter_structured_strings(value)
+    )
+
+
+def _normalize_fact_value(
+    repository: JsonComplianceRepository, attribute_id: str, value: Any
+) -> Any:
+    """Convert a strict ``YYYY-MM-DD`` string for an actual date attribute.
+
+    JSON has no native date type, so this is the boundary's only type
+    conversion. Unparsable or non-date values pass through unchanged.
+    """
+    attribute = repository.get_attribute(attribute_id)
+    if attribute is None or attribute.data_type != "date":
+        return value
+    if not isinstance(value, str) or not _DATE_ONLY_RE.match(value):
+        return value
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return value
+
+
+def _parse_facts_document(document: Any) -> list[dict[str, Any]]:
+    """Strict structural validation of the facts-file payload."""
+    if not isinstance(document, dict) or set(document) != _FACTS_ALLOWED_TOP_LEVEL:
+        raise _FactsFileError(_FACTS_FILE_INVALID)
+    facts = document.get("facts")
+    if not isinstance(facts, list):
+        raise _FactsFileError(_FACTS_FILE_INVALID)
+    entries: list[dict[str, Any]] = []
+    for entry in facts:
+        if not isinstance(entry, dict) or set(entry) != _FACTS_ALLOWED_ENTRY_KEYS:
+            raise _FactsFileError(_FACTS_FILE_INVALID)
+        attribute_id = entry["attribute_id"]
+        if not isinstance(attribute_id, str) or not attribute_id.strip():
+            raise _FactsFileError(_FACTS_FILE_INVALID)
+        entries.append(entry)
+    return entries
+
+
+def _load_product_facts(
+    repository: JsonComplianceRepository, path: str
+) -> list[ProductFact]:
+    """Read, validate, scan and convert a facts file into USER ProductFacts.
+
+    Unknown attribute ids are preserved: the engine, not the boundary, decides
+    that they are unusable.
+    """
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise _FactsFileError(_FACTS_FILE_UNREADABLE) from exc
+    try:
+        document = json.loads(raw)
+    except ValueError as exc:
+        raise _FactsFileError(_FACTS_FILE_INVALID) from exc
+
+    entries = _parse_facts_document(document)
+
+    # Sensitive scan happens before ProductFact construction and before any
+    # model is constructed or invoked.
+    if _contains_sensitive_structured(document):
+        raise _FactsFileError(_SENSITIVE_INPUT_DETECTED)
+
+    return [
+        ProductFact(
+            attribute_id=entry["attribute_id"],
+            value=_normalize_fact_value(
+                repository, entry["attribute_id"], entry["value"]
+            ),
+            origin=FactOrigin.USER,
+        )
+        for entry in entries
+    ]
+
+
 class ClassificationRuntimeError(RuntimeError):
     """Structured classification did not produce a valid, consistent result."""
 
@@ -157,7 +292,9 @@ def _make_agent_runner(model: Any, analysis_service: AnalysisService):
         from src.agent.prompts import SYSTEM_PROMPT
         from src.agent.tools import build_tools
 
-        tools, state = build_tools(analysis_service, category_result)
+        tools, state = build_tools(
+            analysis_service, category_result, context.case.product_facts
+        )
         agent = Agent(
             model=model,
             tools=tools,
@@ -270,6 +407,13 @@ def build_parser() -> argparse.ArgumentParser:
             "| unsupported | uncertain | dual"
         ),
     )
+    parser.add_argument(
+        "--facts-file",
+        help=(
+            "Optional path to a JSON file of human-provided product facts "
+            '({"facts": [{"attribute_id": ..., "value": ...}]}).'
+        ),
+    )
     parser.add_argument("--log-level", default="WARNING")
     return parser
 
@@ -344,13 +488,28 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    repository = JsonComplianceRepository()
+
+    # Human fact boundary. Read, structurally validate, sensitive-scan and
+    # convert BEFORE any model is constructed or invoked, so a malformed or
+    # sensitive facts file can never reach a model.
+    try:
+        product_facts = (
+            _load_product_facts(repository, args.facts_file) if args.facts_file else []
+        )
+    except _FactsFileError as exc:
+        print(
+            f"ERROR [{exc.error_type}]: {_FACTS_ERROR_MESSAGES[exc.error_type]}",
+            file=sys.stderr,
+        )
+        return 2
+
     try:
         model = _build_model_or_none()
     except ValueError as exc:
         print(f"ERROR [model_unavailable]: {redact_secrets(str(exc))}", file=sys.stderr)
         return 3
 
-    repository = JsonComplianceRepository()
     analysis_service = AnalysisService(repository)
     allowed = allowed_category_values(repository)
 
@@ -365,11 +524,14 @@ def main(argv: list[str] | None = None) -> int:
     orchestrator = Orchestrator(classifier, analysis_service)
 
     if model is None:
-        outcome = orchestrator.run(description, provided_category=args.category)
+        outcome = orchestrator.run(
+            description, provided_category=args.category, product_facts=product_facts
+        )
     else:
         outcome = orchestrator.run(
             description,
             provided_category=args.category,
+            product_facts=product_facts,
             agent_runner=_make_agent_runner(model, analysis_service),
         )
     return _render(outcome)

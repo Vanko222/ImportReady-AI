@@ -48,9 +48,6 @@ def build_model() -> Model | None:
                 "api_key": api_key,
             },
             model_id=model_id,
-            # Disable DeepSeek thinking/reasoning mode: equivalent request body
-            # {"thinking": {"type": "disabled"}} passed via the OpenAI SDK.
-            params={"extra_body": {"thinking": {"type": "disabled"}}},
         )
 
     raise ValueError(f"Unsupported MODEL_PROVIDER: {provider!r} (supported: none, bedrock, deepseek)")

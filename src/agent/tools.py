@@ -11,6 +11,7 @@ is created per request, never persisted, and never touches Core.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -18,6 +19,7 @@ from strands import tool
 
 from src.services.analysis import AnalysisResult, AnalysisService
 from src.services.classification import CategoryResult
+from src.state import ProductFact
 
 MAX_TOOL_CALLS = 4
 
@@ -50,6 +52,7 @@ def _budget_error(name: str) -> dict[str, Any]:
 def _analyze_product(
     analysis_service: AnalysisService,
     category_result: CategoryResult,
+    product_facts: Sequence[ProductFact],
     state: ToolExecutionState,
     product_description: str,
 ) -> dict[str, Any]:
@@ -64,7 +67,7 @@ def _analyze_product(
     if state.record("analyze_product") is not None:
         return _budget_error("analyze_product")
     try:
-        result = analysis_service.analyze(category_result)
+        result = analysis_service.analyze(category_result, product_facts)
     except Exception as exc:  # noqa: BLE001 - tool failures become structured errors
         return {
             "ok": False,
@@ -118,13 +121,20 @@ def _get_compliance_evidence(
 def build_tools(
     analysis_service: AnalysisService,
     category_result: CategoryResult,
+    product_facts: Sequence[ProductFact] | None = None,
     max_calls: int = MAX_TOOL_CALLS,
 ) -> tuple[list, ToolExecutionState]:
-    """Build the two per-request tools bound to the resolved category.
+    """Build the two per-request tools bound to the category and human facts.
+
+    ``product_facts`` are the human-boundary canonical facts for THIS request.
+    They are bound behind the Agent-visible tool: the Agent can never supply,
+    choose, or change them, and the exposed signature remains
+    ``analyze_product(product_description)``.
 
     Returns ``(tools, state)`` so callers can inspect :class:`ToolExecutionState`
     after the Agent runs (required to prove ``analyze_product`` was invoked).
     """
+    facts = list(product_facts or [])
     state = ToolExecutionState(max_calls=max_calls)
 
     @tool(
@@ -133,7 +143,9 @@ def build_tools(
     )
     def analyze_product(product_description: str) -> dict[str, Any]:
         """Run the compliance-analysis pipeline for the given product description."""
-        return _analyze_product(analysis_service, category_result, state, product_description)
+        return _analyze_product(
+            analysis_service, category_result, facts, state, product_description
+        )
 
     @tool(
         name="get_compliance_evidence",

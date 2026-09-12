@@ -11,13 +11,31 @@ requiring human review), and ``unknown`` (missing / not-evaluated).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from src.models import ComplianceRule, EvidenceStatus, PolicySource, RuleStatus
 from src.repositories.base import ComplianceRepository
+from src.services.applicability import (
+    ApplicabilityEngine,
+    ApplicabilityReasonCode,
+    ApplicabilityResult,
+    ApplicabilityStatus,
+)
 from src.services.classification import CategoryResult, CategorySource, CategoryStatus
+from src.state import ProductFact
+
+# Deciding reason codes that represent a canonical INPUT DEFECT rather than a
+# knowledge gap. These outrank MISSING_REQUIRED_FACTS in the review-status
+# decision.
+_FACT_DEFECT_REASON_CODES: frozenset[ApplicabilityReasonCode] = frozenset(
+    {
+        ApplicabilityReasonCode.CONTRADICTORY_FACTS,
+        ApplicabilityReasonCode.INVALID_FACT_VALUE,
+    }
+)
 
 
 class ComplianceFinding(BaseModel):
@@ -67,9 +85,10 @@ class VerifiedFacts(BaseModel):
 
 class UnknownInfo(BaseModel):
     missing_information: list[MissingInformation] = Field(default_factory=list)
+    # Applicability is canonical and lives in AnalysisResult.applicability; only
+    # the risk and cost engines are still unimplemented.
     not_evaluated: dict[str, str] = Field(
         default_factory=lambda: {
-            "applicability": "NOT_EVALUATED",
             "risk": "NOT_EVALUATED",
             "cost": "NOT_AVAILABLE",
         }
@@ -91,6 +110,11 @@ class AnalysisResult(BaseModel):
     agent_suggestions: list[dict[str, Any]] = Field(default_factory=list)
     unknown: UnknownInfo = Field(default_factory=UnknownInfo)
     review: Review
+    # Canonical applicability, present only when the category is human-confirmed
+    # (CategoryStatus.RESOLVED). ``None`` means "not evaluated because the
+    # category is not yet confirmed" — it never means NOT_APPLICABLE or "no
+    # requirements".
+    applicability: ApplicabilityResult | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return self.model_dump(mode="json")
@@ -101,13 +125,15 @@ class AnalysisService:
 
     def __init__(self, repository: ComplianceRepository) -> None:
         self._repository = repository
+        # Exactly one engine per service; never re-instantiated per rule.
+        self._applicability_engine = ApplicabilityEngine(repository)
 
     def analyze(
         self,
         category_result: CategoryResult,
-        provided_attribute_ids: list[str] | None = None,
+        product_facts: Sequence[ProductFact] | None = None,
     ) -> AnalysisResult:
-        provided = set(provided_attribute_ids or [])
+        facts = list(product_facts or [])
         knowledge = self._knowledge()
         classification = category_result.model_dump(mode="json")
         status = category_result.category_status
@@ -134,9 +160,22 @@ class AnalysisService:
             )
 
         rules = self._rules_for(category_result.category)
-        missing = self._missing(rules, provided)
-        triggers, actions = self._review(category_result, rules, missing)
-        review_status = self._review_status(category_result, missing)
+
+        # Definitive applicability runs ONLY for a canonically confirmed
+        # (RESOLVED) category. An agent-generated REVIEW_REQUIRED category still
+        # shows candidate compliance information, but never a canonical
+        # applicability verdict and never rule-based missing information.
+        applicability = (
+            self._applicability_engine.evaluate([rule.rule_id for rule in rules], facts)
+            if status == CategoryStatus.RESOLVED
+            else None
+        )
+        missing = (
+            list(applicability.missing_attribute_ids) if applicability is not None else []
+        )
+
+        triggers, actions = self._review(category_result, rules, missing, applicability)
+        review_status = self._review_status(category_result, applicability)
 
         return AnalysisResult(
             knowledge=knowledge,
@@ -157,6 +196,7 @@ class AnalysisService:
                 ]
             ),
             review=Review(status=review_status, triggers=triggers, reviewer_actions=actions),
+            applicability=applicability,
         )
 
     def evidence_for(self, rule_id: str) -> dict[str, Any]:
@@ -212,14 +252,6 @@ class AnalysisService:
                     seen.add(rule.rule_id)
                     rules.append(rule)
         return rules
-
-    def _missing(self, rules: list[ComplianceRule], provided: set[str]) -> list[str]:
-        required: list[str] = []
-        for rule in rules:
-            for attribute_id in rule.required_attribute_ids:
-                if attribute_id not in required:
-                    required.append(attribute_id)
-        return [attribute_id for attribute_id in required if attribute_id not in provided]
 
     def _finding(self, rule: ComplianceRule) -> ComplianceFinding:
         return ComplianceFinding(
@@ -283,11 +315,11 @@ class AnalysisService:
         category_result: CategoryResult,
         rules: list[ComplianceRule],
         missing: list[str],
+        applicability: ApplicabilityResult | None,
     ) -> tuple[list[str], list[str]]:
         triggers: list[str] = []
         if category_result.category_status == CategoryStatus.REVIEW_REQUIRED:
-            # Explicit classification uncertainty must not hide behind the
-            # generic engines_not_implemented trigger.
+            # Explicit classification uncertainty must remain visible.
             triggers.append("category_review_required")
         if missing:
             triggers.append("missing_information")
@@ -295,9 +327,16 @@ class AnalysisService:
             triggers.append("insufficient_evidence")
         if any(rule.rule_status != RuleStatus.EFFECTIVE for rule in rules):
             triggers.append("rule_not_effective")
-        # Applicability / risk / cost engines are not implemented yet; a verified
-        # analysis can therefore never be auto-approved as compliant.
-        triggers.append("engines_not_implemented")
+        # Applicability is implemented and canonical; risk and cost are not.
+        triggers.append("risk_cost_not_implemented")
+        # Only a canonical, evaluated applicability result may raise this. A
+        # ``None`` applicability (unconfirmed category) is already represented
+        # by category_review_required and must not be reported as this.
+        if applicability is not None and any(
+            result.applicability_status == ApplicabilityStatus.REVIEW_REQUIRED
+            for result in applicability.rules
+        ):
+            triggers.append("applicability_review_required")
 
         actions: list[str] = []
         if category_result.category_status == CategoryStatus.REVIEW_REQUIRED:
@@ -307,13 +346,41 @@ class AnalysisService:
         actions.append("human_review_required")
         return triggers, actions
 
-    def _review_status(self, category_result: CategoryResult, missing: list[str]) -> str:
-        if category_result.category_status == CategoryStatus.REVIEW_REQUIRED:
+    def _review_status(
+        self,
+        category_result: CategoryResult,
+        applicability: ApplicabilityResult | None,
+    ) -> str:
+        """Global review status, driven by canonical deciding reason codes.
+
+        ``ApplicabilityResult.missing_attribute_ids`` alone is NOT a NEEDS_INFO
+        signal: an attribute is unusable when it was never supplied, when the
+        supplied canonical value is invalid, when USER facts contradict, or when
+        only untrusted facts exist. Only the canonical deciding reason
+        (``reason_codes[0]``) distinguishes a genuine information gap from an
+        input defect, so this method consumes the engine result rather than
+        re-deriving the cause from raw facts.
+        """
+        if category_result.category_status != CategoryStatus.RESOLVED:
             return "REVIEW_REQUIRED"
-        if missing:
-            return "NEEDS_INFO"
-        # A resolved category with no missing info still cannot be approved
-        # without the not-yet-implemented engines.
+
+        if applicability is not None:
+            deciding = [
+                result.reason_codes[0]
+                for result in applicability.rules
+                if result.reason_codes
+            ]
+            # A canonical input defect takes precedence over a knowledge gap.
+            if any(code in _FACT_DEFECT_REASON_CODES for code in deciding):
+                return "REVIEW_REQUIRED"
+            if any(
+                code == ApplicabilityReasonCode.MISSING_REQUIRED_FACTS
+                for code in deciding
+            ):
+                return "NEEDS_INFO"
+
+        # Risk and cost engines are not implemented, so a resolved category
+        # without a genuine information gap still requires human review.
         return "REVIEW_REQUIRED"
 
     def _suggestions(self, category_result: CategoryResult) -> list[dict[str, Any]]:
