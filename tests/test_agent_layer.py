@@ -7,18 +7,23 @@ SDK-compatible test model that actually invokes ``analyze_product``.
 
 from __future__ import annotations
 
+import io
 import json
+import sys
 
 import pytest
 
 from src.agent.app import (
     _classify_stop_reason,
+    _configure_utf8_output,
     _contains_sensitive_input,
     _extract_text,
     _make_agent_runner,
+    _render,
     _suggest_category,
     redact_secrets,
 )
+from src.agent.prompts import SYSTEM_PROMPT
 from src.agent.tools import build_tools
 from src.repositories.compliance_repository import JsonComplianceRepository
 from src.services.analysis import AnalysisService
@@ -31,7 +36,7 @@ from src.services.classification import (
     agent_suggestion,
     allowed_category_values,
 )
-from src.services.orchestrator import Orchestrator
+from src.services.orchestrator import Orchestrator, OrchestratorOutcome
 from tests.stub_model import (
     ScriptedModel,
     StructuredOutputModel,
@@ -953,3 +958,166 @@ def test_classification_runtime_model_failure(repo: JsonComplianceRepository) ->
         "error_type": "classification_failed",
     }
     assert outcome.agent_runtime["status"] == "FAILED"
+
+
+# --------------------------------------------------------------------------- #
+# 28. Windows UTF-8 CLI output (hardening)
+# --------------------------------------------------------------------------- #
+_OFFLINE_AGENT_RUNTIME = {
+    "mode": "offline",
+    "status": "NOT_USED",
+    "stop_reason": None,
+    "tool_calls": [],
+    "error_type": None,
+}
+_OFFLINE_CLASSIFICATION_RUNTIME = {
+    "mode": "offline",
+    "status": "NOT_USED",
+    "error_type": None,
+}
+
+
+class _FakeOS:
+    """Minimal stand-in for the ``os`` module (only ``name`` is read)."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+def _legacy_gbk_stream() -> tuple[io.TextIOWrapper, io.BytesIO]:
+    buffer = io.BytesIO()
+    return io.TextIOWrapper(buffer, encoding="gbk"), buffer
+
+
+def test_legacy_gbk_stream_would_fail_without_fix() -> None:
+    # Documents the root cause: a GBK stream cannot encode U+26A0.
+    stream, _ = _legacy_gbk_stream()
+    with pytest.raises(UnicodeEncodeError):
+        stream.write("\u26a0")
+        stream.flush()
+
+
+def test_configure_utf8_output_reconfigures_windows_console(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("src.agent.app.os", _FakeOS("nt"))
+    stdout, _ = _legacy_gbk_stream()
+    stderr, _ = _legacy_gbk_stream()
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
+
+    _configure_utf8_output()
+
+    assert stdout.encoding.lower().replace("-", "") == "utf8"
+    assert stderr.encoding.lower().replace("-", "") == "utf8"
+
+
+def test_configure_utf8_output_noop_on_non_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("src.agent.app.os", _FakeOS("posix"))
+    stdout, _ = _legacy_gbk_stream()
+    stderr, _ = _legacy_gbk_stream()
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
+
+    _configure_utf8_output()
+
+    assert stdout.encoding.lower() == "gbk"
+    assert stderr.encoding.lower() == "gbk"
+
+
+def test_configure_utf8_output_safe_without_reconfigure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("src.agent.app.os", _FakeOS("nt"))
+    stdout = io.StringIO()  # no ``reconfigure`` attribute
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+
+    _configure_utf8_output()  # must not raise
+
+    assert not hasattr(stdout, "reconfigure")
+
+
+def test_render_handles_unicode_characters(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("src.agent.app.os", _FakeOS("nt"))
+    stdout, buffer = _legacy_gbk_stream()
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", _legacy_gbk_stream()[0])
+
+    _configure_utf8_output()
+
+    outcome = OrchestratorOutcome(
+        request_id="req_unicode",
+        review_status="REVIEW_REQUIRED",
+        result={"note": "\u26a0 \u2014 \u2019", "classification": {}},
+        agent_runtime=_OFFLINE_AGENT_RUNTIME,
+        classification_runtime=_OFFLINE_CLASSIFICATION_RUNTIME,
+        error=None,
+        exit_code=0,
+    )
+    assert _render(outcome) == 0
+    stdout.flush()
+    decoded = buffer.getvalue().decode("utf-8")
+    for char in ("\u26a0", "\u2014", "\u2019"):
+        assert char in decoded
+
+
+def test_render_output_structure_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    out_buffer = io.StringIO()
+    err_buffer = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", out_buffer)
+    monkeypatch.setattr(sys, "stderr", err_buffer)
+
+    outcome = OrchestratorOutcome(
+        request_id="req_struct",
+        review_status="NEEDS_INFO",
+        result={"classification": {"category_status": "NEEDS_INFO"}},
+        agent_runtime=_OFFLINE_AGENT_RUNTIME,
+        classification_runtime=_OFFLINE_CLASSIFICATION_RUNTIME,
+        error=None,
+        exit_code=0,
+    )
+    assert _render(outcome) == 0
+
+    out = out_buffer.getvalue()
+    assert out.startswith("agent_runtime: ")
+    assert "classification_runtime: " in out
+    assert "request_id: req_struct" in out
+    assert "review_status: NEEDS_INFO" in out
+    assert '"category_status": "NEEDS_INFO"' in out
+    assert err_buffer.getvalue() == ""
+
+
+# --------------------------------------------------------------------------- #
+# 29. Prompt wording guardrails (hardening)
+# --------------------------------------------------------------------------- #
+def test_prompt_prohibits_applicable_language() -> None:
+    assert "If the canonical result reports applicability = NOT_EVALUATED" in SYSTEM_PROMPT
+    assert "must NOT call retrieved rules" in SYSTEM_PROMPT
+    assert "candidate requirements for review" in SYSTEM_PROMPT
+    assert "rules requiring applicability evaluation" in SYSTEM_PROMPT
+    assert "canonical runtime value" in SYSTEM_PROMPT
+
+
+def test_prompt_requires_missing_attributes_unknown() -> None:
+    assert "missing_information" in SYSTEM_PROMPT
+    assert "its value is UNKNOWN" in SYSTEM_PROMPT
+    assert "must be confirmed" in SYSTEM_PROMPT
+    assert "intentional_rf_transmitter" in SYSTEM_PROMPT
+    assert "Battery chemistry is currently unknown" in SYSTEM_PROMPT
+
+
+def test_prompt_lifecycle_rules_preserved() -> None:
+    assert "evidence_status and rule_status are DIFFERENT concepts" in SYSTEM_PROMPT
+    assert "Only rule_status=EFFECTIVE" in SYSTEM_PROMPT
+    assert "must always be described as proposed" in SYSTEM_PROMPT
+    assert "WATCHLIST" in SYSTEM_PROMPT
+    assert "SUPERSEDED" in SYSTEM_PROMPT
+    assert "must never be presented as a current obligation" in SYSTEM_PROMPT
+
+
+def test_prompt_separation_of_facts_preserved() -> None:
+    assert "never be promoted into the verified facts" in SYSTEM_PROMPT
+    assert "agent_generated / REVIEW_REQUIRED" in SYSTEM_PROMPT

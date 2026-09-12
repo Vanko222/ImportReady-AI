@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import sys
 from typing import Any
@@ -273,6 +274,28 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _configure_utf8_output() -> None:
+    """Best-effort UTF-8 for the CLI's stdout/stderr on Windows consoles.
+
+    Windows consoles may default to a legacy code page (e.g. GBK), which makes
+    ``print`` of characters such as U+26A0 raise UnicodeEncodeError. This is
+    Windows-specific: on other platforms the standard streams are left alone.
+    Streams that cannot be reconfigured (tests, redirected/odd runtimes) are
+    left untouched.
+    """
+    if os.name != "nt":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(encoding="utf-8")
+        except (ValueError, OSError, LookupError):
+            # Captured/redirected/odd streams keep their existing behavior.
+            pass
+
+
 def _render(outcome: OrchestratorOutcome) -> int:
     if outcome.agent_runtime:
         print(
@@ -298,6 +321,7 @@ def _render(outcome: OrchestratorOutcome) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_utf8_output()
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.WARNING))
 
