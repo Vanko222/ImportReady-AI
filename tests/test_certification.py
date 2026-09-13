@@ -628,6 +628,40 @@ def test_scan_reports_names_only(tmp_path) -> None:
     assert hits and all(SENTINEL not in hit for hit in hits)
 
 
+# --------------------------------------------------------------------------- #
+# Scanner precision: realistic keys are caught; internal identifiers are not.
+# (Live P3.2B regression: gate 8 reported SECRET_SAFETY_FAILURE because
+#  ``risk_cost_not_implemented`` contains the substring ``sk_cost_not_implemented``.)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("identifier", [
+    "risk_cost_not_implemented",
+    "sk_cost_not_implemented",
+    "sk_if_missing",
+    "risk_if_missing",
+    "sk_token",
+    "task_disk_usage",
+    "the review trigger risk_cost_not_implemented is reported",
+])
+def test_internal_identifiers_are_not_secret_material(identifier: str) -> None:
+    assert cert.scan_for_secrets(identifier) == []
+    assert cert.redact_secrets(identifier) == identifier
+    assert not any(problem.startswith("A3") for problem in cert.check_final_response(identifier))
+
+
+@pytest.mark.parametrize("credential", [
+    "sk-live-xxxxxxxxxxxxxxxxxxxx",
+    "sk_xxxxxxxxxxxxxxxxx",
+    "sk-abcdef1234567890",
+    "sk-proj-abcdef123456789",
+    "sk_test_abcdef123456789",
+    "SK-PROJ-abcdef123456789",
+])
+def test_realistic_key_shapes_are_still_secret_material(credential: str) -> None:
+    assert cert.scan_for_secrets(credential) == ["sk_token"]
+    assert credential not in cert.redact_secrets(credential)
+    assert any(problem.startswith("A3") for problem in cert.check_final_response(credential))
+
+
 def test_write_evidence_refuses_to_write_secrets(tmp_path) -> None:
     path = tmp_path / "evidence.txt"
     with pytest.raises(cert.SecretSafetyError):

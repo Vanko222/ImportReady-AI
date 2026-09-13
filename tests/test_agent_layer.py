@@ -925,6 +925,21 @@ def test_secret_patterns_expanded_token_forms() -> None:
     assert not _contains_sensitive_input("sk-test")
 
 
+def test_secret_patterns_ignore_internal_identifiers() -> None:
+    """An identifier that merely contains ``sk_`` is not credential-shaped material."""
+    for identifier in (
+        "risk_cost_not_implemented",       # contains the substring sk_cost_not_implemented
+        "sk_cost_not_implemented",
+        "sk_if_missing",
+        "risk_if_missing",
+        "sk_token",
+        "task_disk_usage",
+        "the review trigger risk_cost_not_implemented is reported",
+    ):
+        assert not _contains_sensitive_input(identifier), identifier
+        assert redact_secrets(identifier) == identifier
+
+
 # --------------------------------------------------------------------------- #
 # 27. classification_runtime metadata (P1 FIX 5)
 # --------------------------------------------------------------------------- #

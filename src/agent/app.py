@@ -33,12 +33,69 @@ MAX_DESCRIPTION_LENGTH = 2000
 # Minimal log redaction: replaced before anything is written to a log. This is
 # the ONLY sensitive-input handling; no secret manager/vault/encryption layer.
 # All patterns match case-insensitively where the token kind is case-variant.
-_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
+# The ``sk`` entry needs more than a prefix: an English identifier such as ``risk_cost_not_implemented``
+# (or a bare ``sk_if_missing``) contains the same characters as a key prefix, so a plain prefix regex
+# reports it as secret-like. The matcher below therefore requires a REAL KEY STRUCTURE: a long
+# uninterrupted key run (>=16 chars, or >=8 chars carrying a digit), or a segment of >=2 consecutive
+# uppercase letters (how placeholder/test keys read, e.g. ``sk-FAKE-TEST-KEY-ONLY``). This is a
+# structural precision rule; it is deliberately NOT an allowlist of identifier names.
+_SK_PREFIX_RE = re.compile(r"\bsk[-_.]", re.IGNORECASE)
+
+
+def _sk_segments(body: str) -> list[str]:
+    return [part for part in re.split(r"[-_.]+", body) if part]
+
+
+def _is_key_shaped(body: str) -> bool:
+    """True only for a plausible key body — never for a chain of lowercase English words."""
+    for segment in _sk_segments(body):
+        digits = sum(character.isdigit() for character in segment)
+        if len(segment) >= 16:                       # long uninterrupted run: keeps ``sk_xxxxxxxx…``
+            return True
+        if len(segment) >= 8 and digits:             # a real key carries digits in its body
+            return True
+        if re.search(r"[A-Z]{2,}", segment):         # placeholder/test keys read in CAPS: ``sk-FAKE-…``
+            return True
+    return False
+
+
+class _SkCredentialPattern:
+    """``re``-compatible matcher for ``sk``-prefixed credentials with structural precision."""
+
+    pattern = _SK_PREFIX_RE.pattern
+
+    @staticmethod
+    def _spans(text: str) -> list[tuple[int, int]]:
+        spans: list[tuple[int, int]] = []
+        for match in _SK_PREFIX_RE.finditer(text):
+            run = re.match(r"[A-Za-z0-9_.\-]+", text[match.end():])
+            body = run.group(0) if run else ""
+            if _is_key_shaped(body):
+                spans.append((match.start(), match.end() + len(body)))
+        return spans
+
+    def search(self, text: str) -> re.Match[str] | None:
+        text = str(text)
+        spans = self._spans(text)
+        return re.match(r"[\s\S]*", text[spans[0][0]:spans[0][1]]) if spans else None
+
+    def sub(self, replacement: str, text: str) -> str:
+        text = str(text)
+        out, last = [], 0
+        for start, end in self._spans(text):
+            out.append(text[last:start])
+            out.append(replacement)
+            last = end
+        out.append(text[last:])
+        return "".join(out)
+
+
+_SECRET_PATTERNS: tuple[Any, ...] = (
     re.compile(r"AKIA[0-9A-Z]{16}", re.IGNORECASE),
     re.compile(r"Bearer\s+[A-Za-z0-9._\-]+", re.IGNORECASE),
     re.compile(r"token=[^\s&]+", re.IGNORECASE),
     re.compile(r"secret=[^\s&]+", re.IGNORECASE),
-    re.compile(r"sk[-_][A-Za-z0-9_-]{8,}", re.IGNORECASE),
+    _SkCredentialPattern(),
 )
 
 _REDACTED = "[REDACTED]"

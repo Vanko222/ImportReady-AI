@@ -405,9 +405,10 @@ class _CliCertificationStubModel(Model):
     turn once the tool result is present.
     """
 
-    def __init__(self, *, leak: bool = False) -> None:
+    def __init__(self, *, leak: bool = False, continuation_text: str | None = None) -> None:
         self.calls: list = []
         self.leak = leak
+        self.continuation_text = continuation_text
 
     def get_config(self):
         return {"model_id": "cli-certification-stub-model"}
@@ -426,8 +427,7 @@ class _CliCertificationStubModel(Model):
             # Gate 1 / classification text, or the continuation after the tool result came back.
             yield {"messageStart": {"role": "assistant"}}
             yield {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {
-                "text": CERTIFICATION_CATEGORY if not has_tools
-                else "R-ELEC-002 applies; human review remains required."}}}
+                "text": CERTIFICATION_CATEGORY if not has_tools else self._continuation_text()}}}
             yield {"contentBlockStop": {"contentBlockIndex": 0}}
             yield {"messageStop": {"stopReason": "end_turn"}}
         else:
@@ -437,6 +437,9 @@ class _CliCertificationStubModel(Model):
                 "toolUse": {"input": json.dumps({"product_description": "Bluetooth earphones"})}}}}
             yield {"contentBlockStop": {"contentBlockIndex": 0}}
             yield {"messageStop": {"stopReason": "tool_use"}}
+
+    def _continuation_text(self) -> str:
+        return self.continuation_text or "R-ELEC-002 applies; human review remains required."
 
     @staticmethod
     def _tool_result_seen(message: object) -> bool:
@@ -448,7 +451,7 @@ class _CliCertificationStubModel(Model):
             yield {}
 
 
-def stub_offline_run(*, leak: bool = False) -> tuple:
+def stub_offline_run(*, leak: bool = False, continuation_text: str | None = None) -> tuple:
     """Injected adapter factory + the stub model the runner will construct. No network.
 
     The provider side is faked (Gate 1/minimal text, a fixed classification suggestion and a real
@@ -458,7 +461,7 @@ def stub_offline_run(*, leak: bool = False) -> tuple:
     models: list = []
 
     def factory():
-        model = _CliCertificationStubModel(leak=leak)
+        model = _CliCertificationStubModel(leak=leak, continuation_text=continuation_text)
         models.append(model)
         return model
 
@@ -581,6 +584,60 @@ def test_execute_output_contains_no_secret(monkeypatch, tmp_path, capsys) -> Non
     assert any(model.calls for model in models)            # the stub really was driven
     if evidence.exists():
         assert FAKE_SECRET not in evidence.read_text(encoding="utf-8")
+
+
+def test_gate8_passes_when_the_response_carries_canonical_internal_identifiers(
+        monkeypatch, tmp_path) -> None:
+    """Regression (live P3.2B): an internal identifier is not credential-shaped material.
+
+    ``risk_cost_not_implemented`` is emitted by ``AnalysisService._review`` for every case and contains
+    the substring ``sk_cost_not_implemented``, which the previous scanner pattern reported as ``A3`` and
+    which turned gate 8 into ``SECRET_SAFETY_FAILURE``.
+    """
+    import src.certification.live_target as lt
+
+    block_http(monkeypatch)
+    real_bridge = lt.run_guarded_live_certification
+    build_target, _models = stub_offline_run(
+        continuation_text="The canonical result records risk_cost_not_implemented as a review trigger.")
+    evidence = tmp_path / "evidence" / "run.txt"
+
+    def stub_bridge(provider_id, model_id, **kwargs):
+        return real_bridge(provider_id, model_id, build_target=build_target, **kwargs)
+
+    monkeypatch.setattr(lt, "run_guarded_live_certification", stub_bridge)
+    assert live_cli("--execute", "--ack", ACK, "--cases", "A", "--out", str(evidence)) == 0
+    written = evidence.read_text(encoding="utf-8")
+    assert "gate 8 [case:A] PASS" in written
+    assert "SECRET_SAFETY_FAILURE" not in written
+
+
+@pytest.mark.parametrize("claim", [
+    "This product is fully compliant with all applicable requirements.",
+    "There are no compliance obligations for this product.",
+])
+def test_a5_policy_is_independent_of_the_secret_safety_check(monkeypatch, tmp_path, claim) -> None:
+    """A5 stays exactly as it was: a compliance claim while review is required fails gate 8 as A5.
+
+    A5 is a prose-policy finding (``FINAL_RESPONSE_FAILURE`` when it stands alone); it is not the secret
+    scanner and is deliberately unchanged by the scanner precision fix.
+    """
+    import src.certification.live_target as lt
+
+    block_http(monkeypatch)
+    real_bridge = lt.run_guarded_live_certification
+    build_target, _models = stub_offline_run(continuation_text=claim)
+
+    def stub_bridge(provider_id, model_id, **kwargs):
+        return real_bridge(provider_id, model_id, build_target=build_target, **kwargs)
+
+    monkeypatch.setattr(lt, "run_guarded_live_certification", stub_bridge)
+    evidence = tmp_path / "evidence" / "run.txt"
+    assert live_cli("--execute", "--ack", ACK, "--cases", "A", "--out", str(evidence)) == 1
+    written = evidence.read_text(encoding="utf-8")
+    assert "gate 8 [case:A] FAIL" in written
+    assert "A5: compliance claim while review is required" in written
+    assert "A3" not in written
 
 
 def test_execute_end_to_end_with_a_stub_target_and_the_real_runner(monkeypatch, tmp_path, capsys) -> None:
