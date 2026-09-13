@@ -29,6 +29,7 @@ from src.certification.live_target import (
     observation_from_run,
     probe_preflight,
     require_combination,
+    run_guarded_live_certification,
 )
 from src.services.orchestrator import AgentRunOutcome
 
@@ -522,3 +523,101 @@ def test_live_probe_cli_path_is_manual_and_sanitized(monkeypatch, capsys) -> Non
     # the pre-existing offline behaviour is untouched
     assert main(["--provider", "deepseek", "--model", "deepseek-flash"]) == 0
     assert main(["--provider", "deepseek", "--model", "deepseek-flash", "--live"]) == 2
+
+
+# =========================================================================== #
+# Step 3 Phase 3 — the execution bridge to the frozen runner
+# =========================================================================== #
+def test_bridge_calls_the_existing_runner_exactly_once(monkeypatch, tmp_path) -> None:
+    """The bridge builds the adapter for the exact combination and delegates once, with live=True."""
+    calls: list = []
+    sentinel_target = object()
+
+    def fake_make_target(provider_id, model_id, **kwargs):
+        calls.append(("target", provider_id, model_id, kwargs))
+        return sentinel_target
+
+    class _FakeRecord:
+        pass
+
+    fake_record = _FakeRecord()
+
+    def fake_runner(*args, **kwargs):
+        calls.append(("runner", args, kwargs))
+        return fake_record
+
+    limits = cert.RunLimits(max_requests_total=2, max_requests_per_case=1, agent_turns=1,
+                            wall_clock_seconds=30, case_wall_clock_seconds=10)
+    record = run_guarded_live_certification(
+        "deepseek", "deepseek-flash", cases=("A",), limits=limits, environ=DEEPSEEK_ENV,
+        repo_root=tmp_path, evidence_out=tmp_path / "evidence" / "run.txt",
+        build_target=fake_make_target, runner=fake_runner)
+
+    assert record is fake_record
+    assert len(calls) == 2
+    kind, provider_id, model_id, target_kwargs = calls[0]
+    assert kind == "target" and (provider_id, model_id) == ("deepseek", "deepseek-flash")
+    assert target_kwargs == {"literals": ()}
+    assert calls[1][0] == "runner"
+    assert calls[1][1] == (sentinel_target,)
+    kwargs = calls[1][2]
+    assert kwargs["live"] is True                    # the live gate of the frozen runner stays on
+    assert kwargs["cases"] == ("A",)
+    assert kwargs["limits"] is limits
+    assert kwargs["environ"] == DEEPSEEK_ENV
+    assert kwargs["repo_root"] == tmp_path
+    assert kwargs["evidence_out"] == tmp_path / "evidence" / "run.txt"
+    assert kwargs["write_evidence_file"] is True
+    assert kwargs["literals"] == ()
+    assert not (tmp_path / "evidence" / "run.txt").exists()   # a fake runner writes nothing
+
+
+def test_bridge_defaults_to_the_real_adapter_for_the_exact_registered_combination() -> None:
+    """With no injection the bridge builds the real adapter for the resolved combination (no request)."""
+    seen: list = []
+    run_guarded_live_certification("deepseek", "deepseek-flash",
+                                   runner=lambda target, **kwargs: seen.append(target))
+    assert len(seen) == 1
+    target = seen[0]
+    assert (target.provider_id, target.model_id) == ("deepseek", "deepseek-flash")
+    for hook in ("build_model", "minimal_request", "classify", "confirm", "run_case", "run_offline"):
+        assert callable(getattr(target, hook))
+
+def test_bridge_refuses_an_unsupported_combination_before_any_adapter() -> None:
+    """An UNSUPPORTED combination is refused by the registry lookup, with no injection needed."""
+    from src.certification.live_target import require_combination
+
+    with pytest.raises(ValueError):
+        require_combination("deepseek", "deepseek-chat")
+    with pytest.raises(ValueError):
+        require_combination("deepseek", "not-registered-at-all")
+    with pytest.raises(ValueError):
+        run_guarded_live_certification("deepseek", "deepseek-chat",
+                                       runner=lambda *args, **kwargs: None)
+
+
+def test_bridge_uses_the_existing_failure_taxonomy(monkeypatch, tmp_path) -> None:
+    """A real provider failure flows through the frozen runner as the existing canonical category."""
+    block_http(monkeypatch)
+    repo_root, evidence = tmp_path / "repo", tmp_path / "evidence" / "run.txt"
+    model = FailingStubModel("401 unauthorized for key " + SENTINEL)
+    record = run_guarded_live_certification(
+        "deepseek", "deepseek-flash", cases=("A",), environ=DEEPSEEK_ENV, repo_root=repo_root,
+        evidence_out=evidence,
+        build_target=lambda provider_id, model_id, **kwargs: create_live_target(
+            provider_id, model_id, literals=kwargs.get("literals", ()),
+            model_factory=lambda: model),
+        literals=(SENTINEL,))
+
+    assert model.calls == 1                                     # exactly one attempt: never a retry
+    gate1 = [r for r in record.results if r.gate == 1][0]
+    assert gate1.status is cert.GateStatus.FAIL
+    assert gate1.failure is cert.FailureCategory.AUTH_FAILURE   # the frozen taxonomy, not a new code
+    assert [r for r in record.results if r.scope.startswith("case:A")]   # the case ran (offline fallback)
+    assert record.requests_used == 1
+    assert SENTINEL not in record.render_markdown()
+    written = evidence.read_text(encoding="utf-8")
+    assert SENTINEL not in written
+    assert str(tmp_path) not in written                         # the record holds the basename only
+    assert record.evidence_filename() == "run.txt"
+    assert len(record.evidence_sha256) == 64

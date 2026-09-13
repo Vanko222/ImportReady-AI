@@ -11,26 +11,37 @@ registered combination, and the runner constructs the model after pre-flight val
 Gate 1 and model construction are wrapped in the existing ``OutputCaptureBoundary``; the runner
 already wraps classification, and the adapter additionally captures the case run so it can observe
 provider warnings for Gate 7 and signal ``capture_failure`` itself when the secret scan finds anything.
+
+Step 3 Phase 1 adds the two pure guards used by the (still unwired) guarded live entry point:
+``live_acknowledgement_required()`` (exact typed acknowledgement of one combination; no bypass) and
+``render_live_certification_plan()`` (sanitized, non-secret pre-execution plan). Both are offline: no
+request, no model, no credential read.
 """
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, NamedTuple, Sequence
 
 from src.agent.app import _make_agent_runner, _suggest_category
 from src.agent.model_factory import CompatibilityStatus, ModelCombination, build_model, resolve_combination
 from src.certification.certification import (
+    CASE_IDS,
     CaseObservation,
     CaseSpec,
+    CertificationRecord,
     CertificationTarget,
     FailureCategory,
     OutputCaptureBoundary,
     RecordingModelProxy,
+    RunLimits,
     SecretSafetyError,
     classify_provider_error,
+    run_certification,
     sanitize,
+    scan_for_secrets,
 )
 from src.repositories.compliance_repository import JsonComplianceRepository
 from src.services.analysis import AnalysisService
@@ -322,3 +333,158 @@ def live_probe(provider_id: str, model_id: str, environ: Mapping[str, str], *,
         return ProbeResult(provider_id, model_id, False, classify_provider_error(exc).name,
                            latency_ms=int((time.monotonic() - started) * 1000), error_type=type(exc).__name__,
                            error_message=sanitize(str(exc), literals=literals)[:300])
+
+
+# =========================================================================== #
+# Step 3 Phase 1 — guarded live-execution helpers (pure; offline; no credential)
+# =========================================================================== #
+# The exact phrase the operator must type before any live certification request. There is deliberately
+# no "yes"/"--force" shortcut: a bypass keyword can never satisfy an exact-literal check.
+LIVE_ACK_PREFIX = "CERTIFY"
+
+
+def live_acknowledgement_literal(provider_id: str, model_id: str) -> str:
+    """The one acknowledged string for this exact combination: ``CERTIFY <provider>/<model>``."""
+    return f"{LIVE_ACK_PREFIX} {str(provider_id).strip()}/{str(model_id).strip()}"
+
+
+class Acknowledgement(NamedTuple):
+    """Outcome of the typed-acknowledgement check (no request is made either way)."""
+
+    accepted: bool
+    code: str
+    detail: str
+    literal: str
+
+
+def live_acknowledgement_required(provider_id: str, model_id: str,
+                                  provided_ack: str | None = None) -> Acknowledgement:
+    """Accept ONLY the exact acknowledgement literal for this combination.
+
+    Pure and offline: no prompting, no credential read, no I/O. An absent or blank value is reported as
+    ``ACKNOWLEDGEMENT_REQUIRED``; any other value is compared case-sensitively against the single literal,
+    so a different combination, a capitalization difference, ``yes`` or ``--force`` are all refused.
+    Refusal is the fail-closed default and nothing else can ever be accepted.
+    """
+    literal = live_acknowledgement_literal(provider_id, model_id)
+    if not isinstance(provided_ack, str) or not provided_ack.strip():
+        return Acknowledgement(False, "ACKNOWLEDGEMENT_REQUIRED",
+                               f"a live run requires the exact acknowledgement: {literal}", literal)
+    provided = provided_ack.strip()
+    if provided != literal:  # one accepted representation only
+        return Acknowledgement(False, "ACKNOWLEDGEMENT_REJECTED",
+                               f"acknowledgement did not match the exact literal {literal}", literal)
+    return Acknowledgement(True, "ACKNOWLEDGED", f"exact acknowledgement accepted for {literal}", literal)
+
+
+@dataclass(frozen=True)
+class ExecutionPlan:
+    """Sanitized pre-execution plan text; ``findings`` is empty because rendering fails closed instead."""
+
+    text: str
+    findings: tuple[str, ...] = ()
+
+
+def render_live_certification_plan(
+    provider_id: str, model_id: str, *,
+    status: str = "UNKNOWN",
+    ui_exposed: bool = False,
+    certification_ref: Any = None,
+    cases: Sequence[str] = CASE_IDS,
+    limits: RunLimits | None = None,
+    evidence_path: Path | str | None = None,
+    acknowledgement: str | None = None,
+    literals: Iterable[str] = (),
+) -> ExecutionPlan:
+    """Render the sanitized plan an operator must see before a live run is acknowledged.
+
+    Accepts **non-secret** information only and shows no credential: the evidence location is reduced to
+    its basename, and the whole rendering passes through the existing ``sanitize``/``scan_for_secrets``
+    utilities, so any runtime literal is redacted first. A residual credential pattern then fails closed
+    with ``SecretSafetyError`` instead of printing.
+    """
+    resolved_limits = limits if limits is not None else RunLimits()
+    case_list = ", ".join(str(case) for case in (cases or ())) or "none"
+    reference = "none" if certification_ref in (None, "") else str(certification_ref)
+    evidence_label = Path(str(evidence_path)).name if evidence_path else "default directory outside the repository"
+    lines = [
+        f"live certification plan — {provider_id}/{model_id}",
+        f"  registry status: {status} (ui_exposed={ui_exposed}, certification_ref={reference})",
+        "  endpoint strategy: existing environment-driven model factory (operator's own shell)",
+        f"  cases: {case_list}",
+        f"  request ceiling: {resolved_limits.max_requests_total} total, "
+        f"{resolved_limits.max_requests_per_case} per case (no retries)",
+        f"  wall clock: {resolved_limits.wall_clock_seconds}s per run, "
+        f"{resolved_limits.case_wall_clock_seconds}s per case (soft), "
+        f"{resolved_limits.agent_turns} agent turns",
+        f"  evidence: {evidence_label} — written outside the repository, sanitized, scanned, "
+        "referenced by filename and SHA-256; a failing scan refuses the write",
+        "  registry effect: none — certification never promotes, never exposes, and never changes "
+        "provider status",
+    ]
+    if acknowledgement:
+        lines.append(f"  acknowledgement: {acknowledgement}")
+    plan = "\n".join(lines)
+    # Declared runtime literals are removed first. Anything credential-shaped left after that was NOT
+    # declared by the caller, so rendering fails closed rather than printing or silently redacting it.
+    for variant in _literal_variants(plan, literals):
+        findings = scan_for_secrets(variant)
+        if findings:
+            raise SecretSafetyError("refusing to render a plan containing credential-like material: "
+                                    + ", ".join(findings))
+    return ExecutionPlan(sanitize(plan, literals=literals))
+
+
+def _literal_variants(text: str, literals: Iterable[str]) -> list[str]:
+    """Remove every declared literal (and its underscore/dash spelling) so a residual hit is real."""
+    variants = [text]
+    for literal in literals:
+        value = str(literal or "")
+        if len(value) < 4:
+            continue
+        for spelling in (value, value.replace("_", "-"), value.replace("-", "_")):
+            variants = [variant.replace(spelling, "") for variant in variants]
+    return variants
+
+
+# =========================================================================== #
+# Step 3 Phase 3 — execution bridge to the existing (frozen) runner
+# =========================================================================== #
+def run_guarded_live_certification(
+    provider_id: str, model_id: str, *,
+    cases: Sequence[str] = CASE_IDS,
+    limits: RunLimits | None = None,
+    environ: Mapping[str, str] | None = None,
+    repo_root: Path | str | None = None,
+    evidence_out: Path | str | None = None,
+    write_evidence_file: bool = True,
+    literals: Iterable[str] = (),
+    build_target: Callable[[], CertificationTarget] | None = None,
+    runner: Callable[..., CertificationRecord] | None = None,
+) -> CertificationRecord:
+    """Call the existing certification runner once for one exact live combination.
+
+    This is a thin bridge only: it constructs the adapter for the exact registered combination and
+    delegates to the frozen ``run_certification`` (which owns pre-flight validation, gate logic,
+    aggregation, the failure taxonomy, request/wall-clock bounds and record rendering). No gate,
+    aggregation, taxonomy or record logic is duplicated here, and this function reads no credential and
+    makes no request of its own — the runner does, exactly as the CLI/operator decides.
+
+    ``build_target``/``runner`` default to the real adapter and the real runner; they are injection seams
+    so an offline test can prove the wiring without constructing a model or touching the network.
+    """
+    target = (build_target or create_live_target)(provider_id, model_id, literals=tuple(literals))
+    run = runner or run_certification
+    return run(
+        target,
+        cases=tuple(cases),
+        limits=limits,
+        live=True,
+        # The caller supplies the non-secret binding mapping (the CLI reads only MODEL_PROVIDER and
+        # MODEL_ID, exactly as the Step 2 probe path does); this module never reads the environment.
+        environ={} if environ is None else dict(environ),
+        repo_root=Path(repo_root) if repo_root is not None else Path.cwd(),
+        evidence_out=Path(evidence_out) if evidence_out is not None else None,
+        write_evidence_file=write_evidence_file,
+        literals=tuple(literals),
+    )
