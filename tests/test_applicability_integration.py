@@ -32,6 +32,7 @@ from src.services.classification import (
     agent_suggestion,
     allowed_category_values,
 )
+from src.services.cost import CostCalculationStatus, CostItem
 from src.services.orchestrator import AgentRunOutcome, Orchestrator
 from src.services.risk import RiskLevel, RiskReasonCode
 from src.state import FactOrigin, ProductFact
@@ -224,13 +225,14 @@ def test_unresolved_category_yields_none_applicability(category_result):
     assert analysis.applicability is None
 
 
-def test_placeholder_removed_and_risk_evaluated_cost_preserved():
+def test_placeholder_removed_and_risk_and_cost_evaluated():
     analysis = _SERVICE.analyze(_resolved("childrens_toys"), [])
     assert "applicability" not in analysis.unknown.not_evaluated
-    # Deterministic risk actually ran on this RESOLVED path, so the "risk" entry
-    # is removed instead of being replaced by another sentinel.
+    # Deterministic risk and cost actually ran on this RESOLVED path, so their entries
+    # are removed instead of being replaced by other sentinels.
     assert "risk" not in analysis.unknown.not_evaluated
-    assert analysis.unknown.not_evaluated["cost"] == "NOT_AVAILABLE"
+    assert "cost" not in analysis.unknown.not_evaluated
+    assert analysis.unknown.not_evaluated == {}
 
 
 def test_phase_2a_engine_behavior_unchanged():
@@ -564,11 +566,20 @@ def test_offline_agent_and_fallback_agree():
 # =========================================================================== #
 
 
-def test_engines_not_implemented_removed_and_cost_present():
+def test_engines_not_implemented_triggers_are_gone():
     analysis = _SERVICE.analyze(_resolved("childrens_toys"), _toy011_facts(True))
     assert "engines_not_implemented" not in analysis.review.triggers
-    assert "cost_not_implemented" in analysis.review.triggers
     assert "risk_cost_not_implemented" not in analysis.review.triggers
+    # Cost availability is not a compliance review trigger and has no replacement.
+    assert "cost_not_implemented" not in analysis.review.triggers
+    for cost_trigger in (
+        "cost_unavailable",
+        "cost_planning_only",
+        "cost_review_required",
+        "cost_estimate",
+        "cost_missing",
+    ):
+        assert cost_trigger not in analysis.review.triggers
 
 
 def test_applicability_review_required_when_a_rule_is_review_required():
@@ -1046,12 +1057,12 @@ def test_resolved_applicable_rule_is_confirmed_high_and_serialises():
     )
 
 
-def test_resolved_path_removes_the_risk_not_evaluated_entry():
+def test_resolved_path_removes_the_risk_and_cost_not_evaluated_entries():
     analysis = _SERVICE.analyze(_resolved("childrens_toys"), _toy011_facts(True))
     assert analysis.risk is not None and analysis.risk.assessed is True
     assert "risk" not in analysis.unknown.not_evaluated
-    assert analysis.unknown.not_evaluated["cost"] == "NOT_AVAILABLE"
-    assert analysis.to_dict()["unknown"]["not_evaluated"] == {"cost": "NOT_AVAILABLE"}
+    assert "cost" not in analysis.unknown.not_evaluated
+    assert analysis.to_dict()["unknown"]["not_evaluated"] == {}
 
 
 @pytest.mark.parametrize(
@@ -1083,13 +1094,14 @@ def test_unassessed_paths_never_report_none_risk(category_result):
     assert analysis.to_dict()["risk"]["level"] is None
 
 
-def test_review_trigger_reports_cost_only_not_risk():
+def test_review_triggers_never_report_cost_implementation_state():
     orchestrator = Orchestrator(HumanClassifier(allowed_category_values(_REPO)), _SERVICE)
     outcome = orchestrator.run("wooden blocks", provided_category="childrens_toys")
     triggers = outcome.result["review"]["triggers"]
-    assert "cost_not_implemented" in triggers
+    assert "cost_not_implemented" not in triggers
     assert "risk_cost_not_implemented" not in triggers
     assert outcome.result["risk"]["assessed"] is True
+    assert outcome.result["cost"]["assessed"] is True
 
 
 def test_r_elec_012_risk_item_is_review_and_never_high_or_monitor():
@@ -1141,3 +1153,255 @@ def test_agent_compliance_prose_cannot_change_the_risk_assessment():
     assert offline.result["risk"]["assessed"] is True
     assert offline.result["risk"]["level"] == "HIGH"
     assert claim not in json.dumps(offline.result["risk"])
+
+
+# =========================================================================== #
+# Phase 2: deterministic Cost Engine integration
+# =========================================================================== #
+
+
+def _cost_item_ids(analysis) -> list[str]:
+    assert analysis.cost is not None, "cost must be attached on every path"
+    return [item.cost_id for item in analysis.cost.items]
+
+
+def _cost_item(analysis, cost_id: str):
+    assert analysis.cost is not None
+    for item in analysis.cost.items:
+        if item.cost_id == cost_id:
+            return item
+    raise AssertionError(f"{cost_id} missing from cost items")
+
+
+def test_cost_resolved_toys_category_references():
+    analysis = _SERVICE.analyze(_resolved("childrens_toys"), _toy011_facts(True))
+    assert analysis.cost is not None
+    assert analysis.cost.assessed is True
+    assert analysis.cost.category == "childrens_toys"
+    assert len(analysis.cost.items) == 14
+    assert analysis.cost.total_available is False
+    assert analysis.cost.currencies == ["HKD", "USD"]
+
+    locked = _cost_item(analysis, "C-T-001")
+    assert locked.calculation_status is CostCalculationStatus.DIRECT
+    assert locked.exact_amount == 5600.0 and locked.currency == "HKD"
+    zero = _cost_item(analysis, "COST-001")
+    assert zero.calculation_status is CostCalculationStatus.DIRECT
+    assert zero.exact_amount == 0.0 and zero.currency == "USD"
+
+
+def test_cost_resolved_electronics_category_references():
+    analysis = _SERVICE.analyze(_resolved("small_consumer_electronics"), _elec002_facts(True))
+    assert analysis.cost.assessed is True
+    assert analysis.cost.category == "small_consumer_electronics"
+    assert len(analysis.cost.items) == 16
+    assert analysis.cost.total_available is False
+    assert analysis.cost.currencies == ["USD"]
+
+    fee = _cost_item(analysis, "COST-002")
+    assert fee.calculation_status is CostCalculationStatus.DIRECT
+    assert fee.exact_amount == 35.0 and fee.currency == "USD"
+
+    statuses = {item.calculation_status for item in analysis.cost.items}
+    assert CostCalculationStatus.PLANNING_ONLY in statuses
+    assert CostCalculationStatus.QUOTE_REQUIRED in statuses
+    assert CostCalculationStatus.DISPLAY_ONLY in statuses
+    assert _cost_item(analysis, "C-E-001").calculation_status is CostCalculationStatus.PLANNING_ONLY
+    assert _cost_item(analysis, "C-E-009").calculation_status is CostCalculationStatus.QUOTE_REQUIRED
+    assert _cost_item(analysis, "C-E-007").calculation_status is CostCalculationStatus.DISPLAY_ONLY
+
+
+def test_cost_resolved_dual_category_references():
+    analysis = _SERVICE.analyze(_resolved("dual"), _elec002_facts(True))
+    assert analysis.cost.assessed is True
+    assert analysis.cost.category == "dual"
+    ids = _cost_item_ids(analysis)
+    assert len(ids) == 30
+    assert ids == sorted(ids)
+    assert len(set(ids)) == 30
+    assert "C-P-001" not in ids and "COST-005" not in ids
+    assert analysis.cost.currencies == ["HKD", "USD"]
+    assert analysis.cost.total_available is False
+
+
+def test_cost_placeholder_removed_only_when_cost_was_assessed():
+    assessed = _SERVICE.analyze(_resolved("childrens_toys"), _toy011_facts(True))
+    assert assessed.cost.assessed is True
+    assert "cost" not in assessed.unknown.not_evaluated
+    assert "risk" not in assessed.unknown.not_evaluated
+    assert assessed.to_dict()["unknown"]["not_evaluated"] == {}
+
+    for category_result in (
+        CategoryResult(
+            category=None,
+            category_source=CategorySource.UNRESOLVED,
+            category_status=CategoryStatus.NEEDS_INFO,
+        ),
+        CategoryResult(
+            category="unsupported",
+            category_source=CategorySource.HUMAN_CONFIRMED,
+            category_status=CategoryStatus.UNSUPPORTED,
+        ),
+        _agent_category("childrens_toys"),
+    ):
+        unassessed = _SERVICE.analyze(category_result, _toy011_facts(True))
+        assert unassessed.cost.assessed is False
+        assert unassessed.unknown.not_evaluated["cost"] == "NOT_AVAILABLE"
+        assert unassessed.to_dict()["unknown"]["not_evaluated"]["cost"] == "NOT_AVAILABLE"
+
+
+def test_cost_needs_info_is_unassessed():
+    analysis = _SERVICE.analyze(
+        CategoryResult(
+            category=None,
+            category_source=CategorySource.UNRESOLVED,
+            category_status=CategoryStatus.NEEDS_INFO,
+        ),
+        _toy011_facts(True),
+    )
+    assert analysis.cost is not None
+    assert analysis.cost.assessed is False
+    assert analysis.cost.items == []
+    assert analysis.cost.total_available is False
+    assert analysis.cost.counts == {
+        "DIRECT": 0, "PLANNING_ONLY": 0, "QUOTE_REQUIRED": 0, "DISPLAY_ONLY": 0,
+    }
+    assert analysis.unknown.not_evaluated["cost"] == "NOT_AVAILABLE"
+    payload = json.dumps(analysis.to_dict())
+    for cost_id in ("C-T-001", "C-E-001", "COST-001", "COST-002"):
+        assert cost_id not in payload
+
+
+def test_cost_unsupported_never_leaks_cost_005():
+    analysis = _SERVICE.analyze(
+        CategoryResult(
+            category="unsupported",
+            category_source=CategorySource.HUMAN_CONFIRMED,
+            category_status=CategoryStatus.UNSUPPORTED,
+        ),
+        _elec002_facts(True),
+    )
+    assert analysis.cost.assessed is False
+    assert analysis.cost.items == []
+    assert analysis.unknown.not_evaluated["cost"] == "NOT_AVAILABLE"
+    payload = json.dumps(analysis.to_dict())
+    assert "COST-005" not in payload
+    assert "36.8" not in payload
+    for cost_id in ("C-T-001", "C-E-001", "C-P-001"):
+        assert cost_id not in payload
+
+
+def test_cost_agent_generated_category_is_unassessed_until_confirmed():
+    analysis = _SERVICE.analyze(_agent_category("small_consumer_electronics"), _elec002_facts(True))
+    assert analysis.applicability is None
+    assert analysis.cost.assessed is False
+    assert analysis.cost.items == []
+    # the suggested category is preserved, but no references are exposed as assessed
+    assert analysis.cost.category == "small_consumer_electronics"
+    assert analysis.unknown.not_evaluated["cost"] == "NOT_AVAILABLE"
+    payload = json.dumps(analysis.to_dict())
+    assert "C-E-001" not in payload and "COST-002" not in payload
+
+
+def test_cost_is_independent_of_applicability_and_risk_outcomes():
+    """Cost depends only on the confirmed category: facts, applicability and risk never change it."""
+    applicable = _SERVICE.analyze(_resolved("small_consumer_electronics"), _elec002_facts(True))
+    not_applicable = _SERVICE.analyze(_resolved("small_consumer_electronics"), _elec002_facts(False))
+    missing_facts = _SERVICE.analyze(_resolved("small_consumer_electronics"), [])
+
+    # the three runs really do differ in their deterministic applicability/risk outcome
+    assert _status(applicable, "R-ELEC-002") == "APPLICABLE"
+    assert _status(not_applicable, "R-ELEC-002") == "NOT_APPLICABLE"
+    assert _status(missing_facts, "R-ELEC-002") == "REVIEW_REQUIRED"
+    assert applicable.risk.level is RiskLevel.HIGH
+    assert not_applicable.risk.level is not RiskLevel.HIGH
+    assert missing_facts.risk.level is not RiskLevel.HIGH
+
+    baseline = applicable.cost.model_dump(mode="json")
+    assert not_applicable.cost.model_dump(mode="json") == baseline
+    assert missing_facts.cost.model_dump(mode="json") == baseline
+
+
+def test_cost_r_elec_002_high_does_not_change_cost_amounts():
+    analysis = _SERVICE.analyze(_resolved("small_consumer_electronics"), _elec002_facts(True))
+    assert _status(analysis, "R-ELEC-002") == "APPLICABLE"
+    assert _risk_item(analysis, "R-ELEC-002").risk_level is RiskLevel.HIGH
+    assert analysis.cost.assessed is True
+    assert len(analysis.cost.items) == 16
+    assert _cost_item(analysis, "COST-002").exact_amount == 35.0
+    assert _cost_item(analysis, "C-E-001").low_amount == 3000.0
+    assert _cost_item(analysis, "C-E-001").high_amount == 5000.0
+    assert analysis.cost.total_available is False
+
+
+def test_cost_r_elec_012_uncertainty_adds_no_cost_item():
+    facts = _facts(_ELEC012_REQUIRED, overrides={"A-ELEC-011": "lithium ion"})
+    analysis = _SERVICE.analyze(_resolved("small_consumer_electronics"), facts)
+    assert _status(analysis, "R-ELEC-012") == "REVIEW_REQUIRED"
+    assert _codes(analysis, "R-ELEC-012") == ["TRIGGER_LOGIC_NOT_MODELED"]
+    assert "R-ELEC-012" not in TRIGGER_SPECS
+
+    # unchanged category-level reference assessment, with no rule-specific cost linkage
+    baseline = _SERVICE.analyze(_resolved("small_consumer_electronics"), _elec002_facts(True))
+    assert analysis.cost.model_dump(mode="json") == baseline.cost.model_dump(mode="json")
+    assert "rule_id" not in CostItem.model_fields
+    assert "R-ELEC-012" not in json.dumps(analysis.to_dict()["cost"])
+
+
+def test_agent_cost_prose_cannot_change_the_cost_assessment():
+    """Phase 2 cost-side completion of the prose-isolation boundary."""
+    facts = _elec002_facts(True)
+    claim = (
+        "Total compliance cost is $50. The HIGH risk means the product will be expensive. "
+        "All costs are mandatory and payable."
+    )
+
+    def _run(agent_runner=None):
+        return Orchestrator(HumanClassifier(allowed_category_values(_REPO)), _SERVICE).run(
+            "Bluetooth speaker",
+            provided_category="small_consumer_electronics",
+            product_facts=facts,
+            agent_runner=agent_runner,
+        )
+
+    def cost_claim_runner(context, category_result):
+        tools, state = build_tools(_SERVICE, category_result, context.case.product_facts)
+        output = tools[0](context.case.raw_product_input or "x")
+        return AgentRunOutcome(
+            status="SUCCEEDED",
+            stop_reason="end_turn",
+            text=claim,
+            tool_calls=list(state.call_names),
+            error_type=None,
+            analysis_result=output["result"],
+        )
+
+    offline = _run()
+    agent = _run(cost_claim_runner)
+    fallback = _run(_Runner("FAILED"))
+
+    assert agent.result["cost"] == offline.result["cost"]
+    assert fallback.result["cost"] == offline.result["cost"]
+    assert offline.result["cost"]["assessed"] is True
+    assert offline.result["cost"]["total_available"] is False
+    serialized_cost = json.dumps(offline.result["cost"])
+    for claim_sentence in ("$50", "expensive", "mandatory and payable"):
+        assert claim_sentence not in serialized_cost
+    # the Agent's own prose still lands in the suggestion channel only
+    assert agent.result["agent_suggestions"] != offline.result["agent_suggestions"]
+
+
+def test_cost_serialization_contract():
+    analysis = _SERVICE.analyze(_resolved("dual"), _elec002_facts(True))
+    payload = analysis.to_dict()
+    assert "cost" in payload
+    assert payload["cost"]["assessed"] is True
+    assert payload["cost"]["total_available"] is False
+    assert payload["cost"]["total_unavailable_reason"]
+    for forbidden in ("total", "subtotal", "converted_total", "fx_rate", "estimated_total",
+                      "payable_total", "landed_cost"):
+        assert forbidden not in payload["cost"]
+    text = json.dumps(payload)
+    for token in ("NaN", "Infinity", "-Infinity"):
+        assert token not in text, token
+    assert payload["cost"]["currencies"] == ["HKD", "USD"]

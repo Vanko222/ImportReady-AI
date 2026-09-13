@@ -1484,16 +1484,17 @@ def test_f16_structural_comparison_not_json_strings(real_repo, real_engine):
 # =========================================================================== #
 
 
-def test_f17_r3_risk_evaluated_and_cost_placeholder_unchanged(real_repo):
+def test_f17_r3_risk_and_cost_evaluated_placeholders_removed(real_repo):
     orchestrator = Orchestrator(
         HumanClassifier(allowed_category_values(real_repo)), AnalysisService(real_repo)
     )
     outcome = orchestrator.run("wooden blocks", provided_category="childrens_toys")
     not_evaluated = outcome.result["unknown"]["not_evaluated"]
-    # Deterministic risk is evaluated on this RESOLVED path, so its not-evaluated
-    # entry is removed; the cost engine is still unimplemented.
+    # Deterministic risk and cost are both evaluated on this RESOLVED path, so neither
+    # not-evaluated entry remains.
     assert "risk" not in not_evaluated
-    assert not_evaluated["cost"] == "NOT_AVAILABLE"
+    assert "cost" not in not_evaluated
+    assert not_evaluated == {}
 
 
 def test_f17_r4_agent_tool_count_is_still_two(real_repo):

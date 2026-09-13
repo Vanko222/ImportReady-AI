@@ -210,7 +210,7 @@ def test_hallucination_resistance(repo: JsonComplianceRepository) -> None:
     assert result is not None
     assert result["review"]["status"] == "REVIEW_REQUIRED"
     assert "compliant" not in json.dumps(result)
-    assert "cost_not_implemented" in result["review"]["triggers"]
+    assert "cost_not_implemented" not in result["review"]["triggers"]
 
 
 def test_sensitive_input_redacted() -> None:
