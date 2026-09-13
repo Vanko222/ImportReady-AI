@@ -61,7 +61,9 @@ FAILURE_TAXONOMY = (
     "OUTPUT_CAPTURE_UNAVAILABLE", "TIMEOUT", "BUDGET_EXHAUSTED", "RATE_LIMITED",
     "CONFIGURATION_MISMATCH", "EVIDENCE_PATH_REJECTED", "UNKNOWN_PROVIDER_FAILURE",
 )
-FailureCategory = Enum("FailureCategory", FAILURE_TAXONOMY, type=str, module=__name__)
+# Canonical string-valued taxonomy: every member's value IS its name (e.g. AUTH_FAILURE), so
+# rendering (.value / .name / record output) shows the category, never a numeric ordinal.
+FailureCategory = Enum("FailureCategory", {name: name for name in FAILURE_TAXONOMY}, type=str, module=__name__)
 
 
 def case_scope(case_id: str) -> str:

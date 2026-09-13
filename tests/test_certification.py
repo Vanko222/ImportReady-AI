@@ -250,6 +250,23 @@ def one(record: cert.CertificationRecord, gate: int, scope: str) -> cert.GateRes
 # =========================================================================== #
 # Group 1 — status/record machinery
 # =========================================================================== #
+def test_failure_category_renders_by_name_not_an_ordinal() -> None:
+    """Regression: the taxonomy must render canonically (AUTH_FAILURE), never a numeric value."""
+    member = cert.FailureCategory.AUTH_FAILURE
+    assert str(member) != "1"
+    assert repr(member.value) != "'1'"
+    assert "AUTH_FAILURE" in str(member)
+    for name, category in cert.FailureCategory.__members__.items():
+        assert category.value == name, f"{name} must carry its own name as its value"
+        assert category.name == name
+    assert cert.FailureCategory.CONFIGURATION_MISMATCH.value == "CONFIGURATION_MISMATCH"
+    # The certification record renders the category name, not an ordinal.
+    result = cert.GateResult(1, cert.GLOBAL_SCOPE, cert.GateStatus.FAIL, cert.FailureCategory.AUTH_FAILURE, ("x",))
+    record = cert.CertificationRecord(provider_id="deepseek", model_id="deepseek-flash", results=[result])
+    markdown = record.render_markdown()
+    assert "FAIL (AUTH_FAILURE)" in markdown and "FAIL (1)" not in markdown
+
+
 def test_healthy_full_run_passes_and_records_every_gate() -> None:
     record = full_run()
     assert sorted({r.gate for r in record.results}) == list(cert.ALL_GATES)
