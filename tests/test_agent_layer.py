@@ -1145,19 +1145,92 @@ def test_render_output_structure_unchanged(monkeypatch: pytest.MonkeyPatch) -> N
 # 29. Prompt wording guardrails (hardening)
 # --------------------------------------------------------------------------- #
 def test_prompt_prohibits_applicable_language() -> None:
-    # Phase 2 + prompt sync: applicability AND risk are canonical; cost is not.
+    # Prompt sync: applicability, risk AND cost are canonical deterministic layers.
     # The obsolete "not implemented" wording must be gone and status guards present.
     assert "applicability/risk/cost engines" not in SYSTEM_PROMPT
     assert "risk and cost engines are not yet implemented" not in SYSTEM_PROMPT
+    assert "the cost engine is not yet implemented" not in SYSTEM_PROMPT
     assert "Applicability is implemented and canonical" in SYSTEM_PROMPT
-    assert "Applicability and risk assessment are implemented and canonical" in SYSTEM_PROMPT
-    assert "the cost engine is not yet implemented" in SYSTEM_PROMPT
+    assert (
+        "Applicability, risk assessment and cost assessment are implemented and canonical"
+        in SYSTEM_PROMPT
+    )
     assert "canonical per-rule runtime value explicitly reports APPLICABLE" in SYSTEM_PROMPT
     assert "MUST NOT say the product is compliant or approved" in SYSTEM_PROMPT
     assert "no compliance obligations" in SYSTEM_PROMPT
     assert "Never infer a missing value" in SYSTEM_PROMPT
     assert "override the engine" in SYSTEM_PROMPT
     assert "TRIGGER_LOGIC_NOT_MODELED" in SYSTEM_PROMPT
+
+
+def test_prompt_states_the_citation_contract() -> None:
+    """Rule statements cite rule_id + source_id(s); cost statements cite cost_id + source_id(s)."""
+    # the obsolete blanket sentence is gone
+    assert (
+        "Every compliance statement must cite the rule_id and source_id present in the tool output."
+        not in SYSTEM_PROMPT
+    )
+    # the general grounding rule is preserved
+    assert "Base every compliance statement ONLY on the structured output of your tools." in SYSTEM_PROMPT
+    assert (
+        "Statements about a rule, its applicability or its risk must cite the canonical rule_id and "
+        "the relevant source_id(s) from the tool output" in SYSTEM_PROMPT
+    )
+    assert (
+        "Statements about a cost reference must cite the canonical cost_id and the source_id(s) of "
+        "that CostItem" in SYSTEM_PROMPT
+    )
+    assert "a CostItem has no rule_id, so never invent or infer one for it" in SYSTEM_PROMPT
+    assert (
+        "Never place a CostItem next to a rule in a way that implies a rule-to-cost applicability "
+        "mapping" in SYSTEM_PROMPT
+    )
+
+
+def test_prompt_states_the_canonical_cost_contract() -> None:
+    """Cost is canonical: the Agent explains it and never creates or alters it."""
+    assert "Canonical cost assessment (mandatory)" in SYSTEM_PROMPT
+    assert "Cost values come ONLY from the canonical deterministic analysis result" in SYSTEM_PROMPT
+    assert "Never create, change, recalculate or infer any of those fields" in SYSTEM_PROMPT
+    assert "never override a CostItem" in SYSTEM_PROMPT
+    assert "Cost v1 is CATEGORY-LEVEL COST REFERENCE data" in SYSTEM_PROMPT
+    assert (
+        "Never describe a returned CostItem as mandatory, payable, a required fee or applicable to "
+        "this exact product" in SYSTEM_PROMPT
+    )
+    # the four calculation statuses, each with its exact non-claim
+    assert "calculation_status=DIRECT means the approved dataset contains a directly exposable reference amount" in SYSTEM_PROMPT
+    assert "It is NOT mandatory, payable, applicable, or a component of a total" in SYSTEM_PROMPT
+    assert "calculation_status=PLANNING_ONLY is a planning/reference estimate" in SYSTEM_PROMPT
+    assert "Never present it as a quote, a definitive payable amount" in SYSTEM_PROMPT
+    assert "calculation_status=QUOTE_REQUIRED means the approved dataset has no approved numeric amount" in SYSTEM_PROMPT
+    assert "Never present it as 0, free, no cost, or an estimated zero" in SYSTEM_PROMPT
+    assert "calculation_status=DISPLAY_ONLY is informational and non-calculating" in SYSTEM_PROMPT
+    # no safe total, ever, and no FX conversion
+    assert "cost.total_available is always false in Cost v1" in SYSTEM_PROMPT
+    assert "cannot safely be aggregated" in SYSTEM_PROMPT
+    assert (
+        "Never calculate or invent a total, subtotal, estimated total, min/max total, landed cost, "
+        "payable total, per-currency total or converted total" in SYSTEM_PROMPT
+    )
+    assert "because additivity is not represented in the approved data" in SYSTEM_PROMPT
+    assert "Preserve canonical currency exactly" in SYSTEM_PROMPT
+    assert "Never convert currencies, never invent an exchange rate" in SYSTEM_PROMPT
+    assert "explain multiple currencies separately" in SYSTEM_PROMPT
+    # assessed=False is "not assessed", never zero/no-cost
+    assert "When cost.assessed is false, Cost was NOT assessed" in SYSTEM_PROMPT
+    assert "Never describe that as zero cost, no costs, free, or costs not applicable" in SYSTEM_PROMPT
+    assert "cost was not assessed because the product category is unresolved" in SYSTEM_PROMPT
+    assert "verified cost references are not available for that unsupported category" in SYSTEM_PROMPT
+    assert "never expose or infer costs from the raw unsupported cost-data category" in SYSTEM_PROMPT
+    assert "the category still requires human confirmation" in SYSTEM_PROMPT
+    # platform, risk and rule-linkage separations
+    assert "Platform costs are NOT activated in Cost v1" in SYSTEM_PROMPT
+    assert "Never infer Amazon or other platform fees" in SYSTEM_PROMPT
+    assert "Risk never determines cost" in SYSTEM_PROMPT
+    assert "never treat HIGH as expensive" in SYSTEM_PROMPT
+    assert "Cost v1 has no rule-to-cost mapping" in SYSTEM_PROMPT
+    assert "never infer cost applicability from rule text" in SYSTEM_PROMPT
 
 
 def test_prompt_states_the_canonical_risk_contract() -> None:
