@@ -1145,17 +1145,55 @@ def test_render_output_structure_unchanged(monkeypatch: pytest.MonkeyPatch) -> N
 # 29. Prompt wording guardrails (hardening)
 # --------------------------------------------------------------------------- #
 def test_prompt_prohibits_applicable_language() -> None:
-    # Phase 2B: applicability is canonical, risk/cost are not. The obsolete
-    # "not implemented" wording must be gone and status guards must be present.
+    # Phase 2 + prompt sync: applicability AND risk are canonical; cost is not.
+    # The obsolete "not implemented" wording must be gone and status guards present.
     assert "applicability/risk/cost engines" not in SYSTEM_PROMPT
+    assert "risk and cost engines are not yet implemented" not in SYSTEM_PROMPT
     assert "Applicability is implemented and canonical" in SYSTEM_PROMPT
-    assert "risk and cost engines are not yet implemented" in SYSTEM_PROMPT
+    assert "Applicability and risk assessment are implemented and canonical" in SYSTEM_PROMPT
+    assert "the cost engine is not yet implemented" in SYSTEM_PROMPT
     assert "canonical per-rule runtime value explicitly reports APPLICABLE" in SYSTEM_PROMPT
     assert "MUST NOT say the product is compliant or approved" in SYSTEM_PROMPT
     assert "no compliance obligations" in SYSTEM_PROMPT
     assert "Never infer a missing value" in SYSTEM_PROMPT
     assert "override the engine" in SYSTEM_PROMPT
     assert "TRIGGER_LOGIC_NOT_MODELED" in SYSTEM_PROMPT
+
+
+def test_prompt_states_the_canonical_risk_contract() -> None:
+    """Risk is canonical: the Agent explains it and never creates or alters it."""
+    assert "Canonical risk assessment (mandatory)" in SYSTEM_PROMPT
+    assert "Risk values come ONLY from the canonical deterministic analysis result" in SYSTEM_PROMPT
+    assert "Never create, change, recalculate, or infer risk.level" in SYSTEM_PROMPT
+    assert "You MAY explain the canonical risk result to the user" in SYSTEM_PROMPT
+    assert "HIGH is NOT a statement of legal severity" in SYSTEM_PROMPT
+    assert "HIGH means a confirmed current applicable obligation" in SYSTEM_PROMPT
+    assert "REVIEW means deterministic uncertainty remains" in SYSTEM_PROMPT
+    # MONITOR is not lifecycle-only: the engine also emits MONITOR + KNOWN_GAP.
+    assert "MONITOR means the deterministic Risk Engine marked this item for monitoring/tracking" in SYSTEM_PROMPT
+    assert "or a KNOWN_GAP data-limitation item" in SYSTEM_PROMPT
+    assert "never invent a lifecycle explanation for a KNOWN_GAP item" in SYSTEM_PROMPT
+    assert (
+        "MONITOR must never be generalized into an overall compliance or import-approval conclusion"
+        in SYSTEM_PROMPT
+    )
+    assert "NONE means only that the deterministic assessment confirmed no risk-bearing item" in SYSTEM_PROMPT
+    # assessed=False is "not evaluated" and must not be reported as NONE.
+    assert "When risk.assessed is false and risk.level is null, risk was NOT evaluated" in SYSTEM_PROMPT
+    assert "never describe it as NONE or as a negative risk finding" in SYSTEM_PROMPT
+    assert "for NEEDS_INFO / unresolved, ask for the missing information or clarification" in SYSTEM_PROMPT
+    assert (
+        "for UNSUPPORTED, state that verified compliance information for that category is not available"
+        in SYSTEM_PROMPT
+    )
+    assert (
+        "do not imply that supplying more product attributes will necessarily make the category supported"
+        in SYSTEM_PROMPT
+    )
+    assert (
+        "for REVIEW_REQUIRED / an unconfirmed category, preserve uncertainty and request human category "
+        "confirmation" in SYSTEM_PROMPT
+    )
 
 
 def test_prompt_requires_missing_attributes_unknown() -> None:
@@ -1185,7 +1223,16 @@ def test_prompt_separation_of_facts_preserved() -> None:
 # --------------------------------------------------------------------------- #
 def test_prompt_guides_uncertainty_when_review_is_not_resolved() -> None:
     assert "Whenever the canonical review status is not RESOLVED" in SYSTEM_PROMPT
-    assert "must be provided before it can be assessed" in SYSTEM_PROMPT
+    # The blanket "more documentation always fixes it" wording contradicts the
+    # UNSUPPORTED guidance and must be gone; next steps are status-specific.
+    assert (
+        "additional documentation must be provided before it can be assessed"
+        not in SYSTEM_PROMPT
+    )
+    assert "follow the canonical classification/review status for the appropriate next step" in SYSTEM_PROMPT
+    assert "request the missing information or clarification when the status is NEEDS_INFO" in SYSTEM_PROMPT
+    assert "when the status is UNSUPPORTED" in SYSTEM_PROMPT
+    assert "when the status is REVIEW_REQUIRED" in SYSTEM_PROMPT
     assert "further human review " in SYSTEM_PROMPT
     assert "not even negated, softened, or presented as a quotation" in SYSTEM_PROMPT
 
