@@ -616,11 +616,12 @@ def test_gate8_passes_when_the_response_carries_canonical_internal_identifiers(
     "This product is fully compliant with all applicable requirements.",
     "There are no compliance obligations for this product.",
 ])
-def test_a5_policy_is_independent_of_the_secret_safety_check(monkeypatch, tmp_path, claim) -> None:
-    """A5 stays exactly as it was: a compliance claim while review is required fails gate 8 as A5.
+def test_response_guard_rewrites_the_claim_before_gate8(monkeypatch, tmp_path, claim) -> None:
+    """The deterministic response guard runs between the model output and gate 8.
 
-    A5 is a prose-policy finding (``FINAL_RESPONSE_FAILURE`` when it stands alone); it is not the secret
-    scanner and is deliberately unchanged by the scanner precision fix.
+    A5 itself is unchanged (its detector is covered directly in ``tests/test_certification.py``); what
+    this asserts is the wiring: the guard rewrites the compliance conclusion, records the rewrite in the
+    observation warnings, and gate 8 then sees uncertainty wording instead of a claim.
     """
     import src.certification.live_target as lt
 
@@ -633,11 +634,24 @@ def test_a5_policy_is_independent_of_the_secret_safety_check(monkeypatch, tmp_pa
 
     monkeypatch.setattr(lt, "run_guarded_live_certification", stub_bridge)
     evidence = tmp_path / "evidence" / "run.txt"
-    assert live_cli("--execute", "--ack", ACK, "--cases", "A", "--out", str(evidence)) == 1
+    assert live_cli("--execute", "--ack", ACK, "--cases", "A", "--out", str(evidence)) == 0
     written = evidence.read_text(encoding="utf-8")
-    assert "gate 8 [case:A] FAIL" in written
-    assert "A5: compliance claim while review is required" in written
-    assert "A3" not in written
+    assert "gate 8 [case:A] PASS" in written
+    assert "A5: compliance claim while review is required" not in written   # no claim reached the gate
+    assert "A5: definite-current-obligation" not in written
+    # The record preserves the deterministic guard marker (the guarded prose itself is not serialized).
+    assert "response guard: 1 compliance conclusion(s) rewritten" in written
+
+
+def test_guard_is_not_applied_to_a_resolved_case(monkeypatch, tmp_path) -> None:
+    """The guard only activates for an unresolved canonical status (Rule 1)."""
+    from src.agent.response_guard import should_guard
+
+    assert should_guard("REVIEW_REQUIRED") is True
+    assert should_guard("NEEDS_INFO") is True
+    assert should_guard("RESOLVED") is False
+    assert should_guard("UNSUPPORTED") is False
+    assert should_guard(None) is False
 
 
 def test_execute_end_to_end_with_a_stub_target_and_the_real_runner(monkeypatch, tmp_path, capsys) -> None:

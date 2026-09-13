@@ -27,6 +27,7 @@ from typing import Any, Callable, Iterable, Mapping, NamedTuple, Sequence
 
 from src.agent.app import _make_agent_runner, _suggest_category
 from src.agent.model_factory import CompatibilityStatus, ModelCombination, build_model, resolve_combination
+from src.agent.response_guard import guard_observation_text, guard_summary
 from src.certification.certification import (
     CASE_IDS,
     CaseObservation,
@@ -130,7 +131,12 @@ def classify_warning(warnings: Sequence[str], *, completed_normally: bool, overr
 
 def observation_from_run(outcome: Any, proxy: RecordingModelProxy, *, case: CaseSpec,
                          warnings: Sequence[str] = (), warning_class: str = "NOT_OBSERVED") -> CaseObservation:
-    """Map a real orchestrator run + proxy observations into the observation the gates consume."""
+    """Map a real orchestrator run + proxy observations into the observation the gates consume.
+
+    The deterministic response guard runs here - after the output capture and before Gate 8 reads the
+    prose - so a compliance conclusion the canonical status does not support is replaced by the approved
+    uncertainty wording. The canonical result (``analysis_result``) is never modified.
+    """
     runtime = getattr(outcome, "agent_runtime", None) or {}
     result = getattr(outcome, "result", None)
     final_text = ""
@@ -139,19 +145,20 @@ def observation_from_run(outcome: Any, proxy: RecordingModelProxy, *, case: Case
             final_text = str(suggestion.get("text") or "")
     requests = int(getattr(proxy, "requests", 0) or 0)
     tool_uses = tuple(getattr(proxy, "tool_use_events", ()) or ())
+    guarded_text, guard_result = guard_observation_text(result, final_text)
     return CaseObservation(
         confirmed_classification=(result or {}).get("classification"),
         analysis_result=result,
         omitted_fact_ids=OMITTED_FACTS.get(case.case_id, ()),
         stop_reason=runtime.get("stop_reason"),
-        final_text=final_text,
+        final_text=guarded_text,
         tools_exposed=dict(getattr(proxy, "tool_surface", {}) or {}),
         tool_use_events=tool_uses,
         tool_result_incorporated=bool(getattr(proxy, "tool_result_incorporated", False)),
         continuation_turns=max(requests - 1, 0) if tool_uses else 0,
         turns=requests,
         provider_requests=requests,
-        warnings=tuple(warnings),
+        warnings=tuple(warnings) + ((guard_summary(guard_result),) if guard_result.activated else ()),
         warning_class=warning_class,
         blocked=None if runtime.get("status") in ("SUCCEEDED", "NOT_USED") else FailureCategory.TOOL_EXECUTION_FAILURE,
     )
