@@ -35,6 +35,7 @@ from src.services.applicability import (
     ApplicabilityEngine,
     ApplicabilityReasonCode,
     ApplicabilityStatus,
+    ConditionState,
     FactIssueCode,
     TriggerBranch,
     TriggerCombine,
@@ -45,7 +46,10 @@ from src.services.applicability import (
     _APPROVED_SPEC_RULE_IDS,
     _VOCABULARY_FREE_ATTRIBUTE_IDS,
     _branch_matched_values,
+    _condition_state,
+    _required_condition_problems,
     _resolve_outcome,
+    _resolve_required_conditions,
     _spec_problems,
     _validate_value,
     _values_equal,
@@ -326,10 +330,24 @@ def test_f1_t_s1_no_spec_problems(real_repo):
     assert validate_trigger_specs(real_repo) == []
 
 
+_APPROVED_SPEC_IDS = frozenset(
+    {
+        "R-ELEC-001",
+        "R-ELEC-002",
+        "R-ELEC-005",
+        "R-ELEC-009",
+        "R-TOY-010",
+        "R-TOY-011",
+        "R-TOY-012",
+    }
+)
+
+
 def test_f1_t_s2_exact_approved_spec_set():
-    assert set(TRIGGER_SPECS) == {"R-TOY-010", "R-TOY-011", "R-ELEC-002"}
+    assert set(TRIGGER_SPECS) == set(_APPROVED_SPEC_IDS)
     assert "R-ELEC-012" not in TRIGGER_SPECS
-    assert len(TRIGGER_SPECS) == 3
+    assert "R-TOY-013" not in TRIGGER_SPECS
+    assert len(TRIGGER_SPECS) == 7
 
 
 def test_f1_t_s3_spec_rule_ids_resolve(real_repo):
@@ -348,6 +366,15 @@ def test_f1_t_s4_condition_attributes_are_required(real_repo):
 
 def test_f1_t_s5_single_deciding_attribute_matches_condition():
     for spec in TRIGGER_SPECS.values():
+        assert spec.deciding_attribute_ids
+        if spec.required_conditions:
+            # V2 form: one deciding attribute per required predicate, in condition order
+            assert spec.deciding_attribute_ids == [
+                c.attribute_id for c in spec.required_conditions
+            ]
+            assert not spec.branches
+            continue
+        # V1 form: exactly one deciding attribute, every branch a single condition on it
         assert len(spec.deciding_attribute_ids) == 1
         for b in spec.branches:
             assert len(b.conditions) == 1
@@ -384,8 +411,10 @@ def test_f1_t_s8_deciding_attributes_have_closed_domain(real_repo):
 
 
 def test_f1_t_s9_boolean_partition_uses_canonical_domain():
-    for rule_id in ("R-TOY-010", "R-TOY-011", "R-ELEC-002"):
+    for rule_id in sorted(_APPROVED_SPEC_IDS):
         spec = TRIGGER_SPECS[rule_id]
+        if not spec.branches:
+            continue  # V2 condition form is covered by the F.20 tests
         matched = set()
         for b in spec.branches:
             matched |= set(_branch_matched_values(spec, b))
@@ -468,7 +497,7 @@ def test_f1_t_s17_unapproved_rule_id_rejected():
     spec = baseline_toy010_spec()
     spec.rule_id = "R-TEST-001"
     problems = _spec_problems(repo, spec)
-    assert any("not in the approved Phase 2A spec set" in p for p in problems)
+    assert any("not in the approved trigger-spec set" in p for p in problems)
 
 
 def test_f1_t_s18_branch_matched_values():
@@ -1245,7 +1274,7 @@ def test_f13_u1_unmodeled_rule_reports_not_modeled(real_repo, real_engine):
     assert entry.reason_codes == [R.TRIGGER_LOGIC_NOT_MODELED]
 
 
-@pytest.mark.parametrize("rule_id", ["R-TOY-004", "R-ELEC-003"])
+@pytest.mark.parametrize("rule_id", ["R-TOY-004", "R-ELEC-006"])
 def test_f13_u2_other_unmodeled_rules(real_repo, real_engine, rule_id):
     entry = real_engine.evaluate([rule_id], facts_for_rule(real_repo, rule_id)).rules[0]
     assert entry.reason_codes == [R.TRIGGER_LOGIC_NOT_MODELED]
@@ -1260,7 +1289,7 @@ def test_f13_u3_elec012_remains_unmodeled(real_repo, real_engine):
     assert "R-ELEC-012" not in TRIGGER_SPECS
 
 
-@pytest.mark.parametrize("rule_id", ["R-ELEC-017", "R-TOY-012", "R-TOY-014"])
+@pytest.mark.parametrize("rule_id", ["R-ELEC-017", "R-TOY-007", "R-TOY-014"])
 def test_f13_u4_deferred_rules_absent_from_specs(real_repo, real_engine, rule_id):
     assert rule_id not in TRIGGER_SPECS
     entry = real_engine.evaluate([rule_id], facts_for_rule(real_repo, rule_id)).rules[0]
@@ -1269,10 +1298,612 @@ def test_f13_u4_deferred_rules_absent_from_specs(real_repo, real_engine, rule_id
 
 def test_f13_u5_unmodeled_rules_never_get_a_verdict(real_repo, real_engine):
     unmodeled = [rid for rid in ALL_RULE_IDS if rid not in TRIGGER_SPECS]
-    assert len(unmodeled) == 38
+    assert len(unmodeled) == 34
     facts = [f for rule_id in unmodeled for f in facts_for_rule(real_repo, rule_id)]
     for entry in real_engine.evaluate(unmodeled, facts).rules:
         assert entry.applicability_status not in (S.APPLICABLE, S.NOT_APPLICABLE)
+
+
+# =========================================================================== #
+# F.18 Phase 3 trigger-coverage expansion (subject-matter presence specs)
+# =========================================================================== #
+PHASE3_SPEC_CASES: tuple[tuple[str, str], ...] = (
+    ("R-ELEC-001", "A-ELEC-001"),
+)
+
+
+@pytest.mark.parametrize(("rule_id", "attribute_id"), PHASE3_SPEC_CASES)
+def test_f18_deciding_attribute_is_the_taxonomy_declared_subject_matter(
+    real_repo, rule_id, attribute_id
+):
+    """A new spec is safe only when the taxonomy itself declares the trigger link."""
+    rule = real_repo.get_rule(rule_id)
+    attribute = real_repo.get_attribute(attribute_id)
+    assert rule is not None and attribute is not None
+    assert attribute_id in rule.required_attribute_ids
+    assert rule_id in attribute.triggered_rule_ids
+    assert canonical_domain(attribute) == frozenset({True, False})
+    assert TRIGGER_SPECS[rule_id].deciding_attribute_ids == [attribute_id]
+
+
+@pytest.mark.parametrize(("rule_id", "attribute_id"), PHASE3_SPEC_CASES)
+def test_f18_trigger_satisfied_is_applicable(real_repo, real_engine, rule_id, attribute_id):
+    entry = real_engine.evaluate(
+        [rule_id], facts_for_rule(real_repo, rule_id, {attribute_id: True})
+    ).rules[0]
+    assert entry.applicability_status == S.APPLICABLE
+    assert entry.reason_codes == [R.TRIGGER_SATISFIED]
+    assert entry.evaluated_attribute_ids == [attribute_id]
+    assert entry.rule_status == RuleStatus.EFFECTIVE
+    assert entry.evidence_status == EvidenceStatus.VERIFIED
+
+
+@pytest.mark.parametrize(("rule_id", "attribute_id"), PHASE3_SPEC_CASES)
+def test_f18_trigger_not_satisfied_is_not_applicable(real_repo, real_engine, rule_id, attribute_id):
+    entry = real_engine.evaluate(
+        [rule_id], facts_for_rule(real_repo, rule_id, {attribute_id: False})
+    ).rules[0]
+    assert entry.applicability_status == S.NOT_APPLICABLE
+    assert entry.reason_codes == [R.TRIGGER_NOT_SATISFIED]
+    assert entry.evaluated_attribute_ids == [attribute_id]
+
+
+@pytest.mark.parametrize(("rule_id", "attribute_id"), PHASE3_SPEC_CASES)
+def test_f18_missing_deciding_fact_never_gets_a_verdict(real_repo, real_engine, rule_id, attribute_id):
+    facts = [
+        fact for fact in facts_for_rule(real_repo, rule_id) if fact.attribute_id != attribute_id
+    ]
+    entry = real_engine.evaluate([rule_id], facts).rules[0]
+    assert entry.applicability_status not in (S.APPLICABLE, S.NOT_APPLICABLE)
+    assert attribute_id in entry.missing_attribute_ids
+    assert R.MISSING_REQUIRED_FACTS in entry.reason_codes
+
+
+@pytest.mark.parametrize(("rule_id", "attribute_id"), PHASE3_SPEC_CASES)
+def test_f18_invalid_deciding_fact_is_review_required(real_repo, real_engine, rule_id, attribute_id):
+    entry = real_engine.evaluate(
+        [rule_id], facts_for_rule(real_repo, rule_id, {attribute_id: "not-a-boolean"})
+    ).rules[0]
+    assert entry.applicability_status == S.REVIEW_REQUIRED
+    assert R.INVALID_FACT_VALUE in entry.reason_codes
+
+
+@pytest.mark.parametrize(("rule_id", "attribute_id"), PHASE3_SPEC_CASES)
+def test_f18_contradictory_deciding_facts_are_review_required(real_repo, real_engine, rule_id, attribute_id):
+    facts = facts_for_rule(real_repo, rule_id, {attribute_id: True})
+    facts.append(make_fact(attribute_id, False))
+    entry = real_engine.evaluate([rule_id], facts).rules[0]
+    assert entry.applicability_status == S.REVIEW_REQUIRED
+    assert R.CONTRADICTORY_FACTS in entry.reason_codes
+
+
+@pytest.mark.parametrize(("rule_id", "attribute_id"), PHASE3_SPEC_CASES)
+def test_f18_evidence_gate_still_precedes_the_new_trigger(rule_id, attribute_id):
+    repo = StubRepository(
+        rules=[make_rule(rule_id, [attribute_id], evidence_status=EvidenceStatus.UNVERIFIED)],
+        attributes=[make_attribute(attribute_id, "boolean")],
+    )
+    entry = ApplicabilityEngine(repo).evaluate([rule_id], [make_fact(attribute_id, True)]).rules[0]
+    assert entry.applicability_status == S.REVIEW_REQUIRED
+    assert entry.reason_codes[0] == R.EVIDENCE_NOT_VERIFIED
+
+
+@pytest.mark.parametrize(("rule_id", "attribute_id"), PHASE3_SPEC_CASES)
+def test_f18_lifecycle_gate_still_precedes_the_new_trigger(rule_id, attribute_id):
+    repo = StubRepository(
+        rules=[make_rule(rule_id, [attribute_id], rule_status=RuleStatus.PROPOSED)],
+        attributes=[make_attribute(attribute_id, "boolean")],
+    )
+    entry = ApplicabilityEngine(repo).evaluate([rule_id], [make_fact(attribute_id, True)]).rules[0]
+    assert entry.applicability_status == S.REVIEW_REQUIRED
+    assert entry.reason_codes[0] == R.LIFECYCLE_PROPOSED
+
+
+def test_f18_r_elec_002_is_unchanged_by_the_expansion(real_repo, real_engine):
+    entry = real_engine.evaluate(
+        ["R-ELEC-002"], facts_for_rule(real_repo, "R-ELEC-002", {"A-ELEC-002": True})
+    ).rules[0]
+    assert entry.applicability_status == S.APPLICABLE
+    assert entry.reason_codes == [R.TRIGGER_SATISFIED]
+    assert entry.evaluated_attribute_ids == ["A-ELEC-002"]
+
+
+def test_f18_r_elec_012_still_unmodeled(real_repo, real_engine):
+    facts = facts_for_rule(real_repo, "R-ELEC-012", {"A-ELEC-011": "lithium ion"})
+    entry = real_engine.evaluate(["R-ELEC-012"], facts).rules[0]
+    assert entry.applicability_status == S.REVIEW_REQUIRED
+    assert entry.reason_codes == [R.TRIGGER_LOGIC_NOT_MODELED]
+    assert "R-ELEC-012" not in TRIGGER_SPECS
+
+
+# =========================================================================== #
+# F.19 Demoted specs: exemption/exclusion cannot be represented (fail closed)
+# =========================================================================== #
+def test_f19_r_elec_003_is_demoted(real_repo, real_engine):
+    """The 15.103 exemption screen is not modeled, so the broad digital-device boolean is not enough."""
+    assert "R-ELEC-003" not in TRIGGER_SPECS
+    facts = facts_for_rule(real_repo, "R-ELEC-003", {"A-ELEC-004": True})
+    entry = real_engine.evaluate(["R-ELEC-003"], facts).rules[0]
+    assert entry.applicability_status in (S.NEEDS_INFO, S.REVIEW_REQUIRED)
+    assert entry.applicability_status not in (S.APPLICABLE, S.NOT_APPLICABLE)
+    assert entry.reason_codes == [R.TRIGGER_LOGIC_NOT_MODELED]
+    # and the same is true whichever way the broad boolean is set
+    for value in (True, False):
+        other = real_engine.evaluate(
+            ["R-ELEC-003"], facts_for_rule(real_repo, "R-ELEC-003", {"A-ELEC-004": value})
+        ).rules[0]
+        assert other.applicability_status not in (S.APPLICABLE, S.NOT_APPLICABLE)
+
+
+def test_f19_r_elec_003_digital_device_true_never_reaches_high(real_repo, real_engine):
+    """Regression: digital_device_or_peripheral alone must never create a confirmed obligation."""
+    from src.services.risk import RiskEngine, RiskLevel
+
+    rules = [real_repo.get_rule("R-ELEC-003")]
+    facts = facts_for_rule(real_repo, "R-ELEC-003", {"A-ELEC-004": True})
+    applicability = real_engine.evaluate(["R-ELEC-003"], facts)
+    risk = RiskEngine(real_repo).assess(rules, applicability)
+    assert risk.items
+    assert all(item.risk_level is not RiskLevel.HIGH for item in risk.items)
+    assert not [i for i in risk.items if i.risk_level is RiskLevel.HIGH]
+
+
+def test_f19_r_toy_005_is_demoted(real_repo, real_engine):
+    """Coating exclusions live in A-TOY-009, a structured_list with no closed canonical domain."""
+    assert "R-TOY-005" not in TRIGGER_SPECS
+    facts = facts_for_rule(real_repo, "R-TOY-005", {"A-TOY-008": True})
+    entry = real_engine.evaluate(["R-TOY-005"], facts).rules[0]
+    assert entry.applicability_status in (S.NEEDS_INFO, S.REVIEW_REQUIRED)
+    assert entry.applicability_status not in (S.APPLICABLE, S.NOT_APPLICABLE)
+    assert entry.reason_codes == [R.TRIGGER_LOGIC_NOT_MODELED]
+
+
+def test_f19_r_toy_005_coating_true_never_reaches_high(real_repo, real_engine):
+    from src.services.risk import RiskEngine, RiskLevel
+
+    rules = [real_repo.get_rule("R-TOY-005")]
+    facts = facts_for_rule(real_repo, "R-TOY-005", {"A-TOY-008": True})
+    applicability = real_engine.evaluate(["R-TOY-005"], facts)
+    risk = RiskEngine(real_repo).assess(rules, applicability)
+    assert risk.items
+    assert all(item.risk_level is not RiskLevel.HIGH for item in risk.items)
+
+
+def test_f19_excluded_coating_types_have_no_safe_predicate(real_repo):
+    """Documents why R-TOY-005 cannot be completed: the exclusion attribute has no closed domain."""
+    attribute = real_repo.get_attribute("A-TOY-009")
+    assert attribute is not None
+    assert attribute.data_type == "structured_list"
+    assert canonical_domain(attribute) is None
+    # and the rule's declared 'unknown' vocabulary member is outside the canonical boolean domain
+    coating = real_repo.get_attribute("A-TOY-008")
+    assert coating.data_type == "boolean"
+    assert canonical_domain(coating) == frozenset({True, False})
+
+
+# =========================================================================== #
+# F.21 R-TOY-013 demoted: the <= 30 V rms exclusion cannot be modeled safely
+# =========================================================================== #
+def test_f21_r_toy_013_is_demoted(real_repo, real_engine):
+    """Regression: powered_from_120v_branch_circuit alone must not create a confirmed obligation."""
+    assert "R-TOY-013" not in TRIGGER_SPECS
+    facts = facts_for_rule(real_repo, "R-TOY-013", {"A-TOY-019": True, "A-TOY-026": 12})
+    entry = real_engine.evaluate(["R-TOY-013"], facts).rules[0]
+    assert entry.applicability_status == S.REVIEW_REQUIRED
+    assert entry.reason_codes == [R.TRIGGER_LOGIC_NOT_MODELED]
+    assert entry.applicability_status is not S.APPLICABLE
+    assert R.TRIGGER_SATISFIED not in entry.reason_codes
+
+
+@pytest.mark.parametrize(
+    ("overrides", "why"),
+    [
+        ({"A-TOY-019": True, "A-TOY-026": 12}, "12 V rms is inside the <= 30 V rms exclusion"),
+        ({"A-TOY-019": True, "A-TOY-026": 120}, "120 V rms would satisfy the main condition"),
+        ({"A-TOY-019": False, "A-TOY-026": 12}, "not 120 V powered"),
+    ],
+)
+def test_f21_r_toy_013_never_gets_a_verdict(real_repo, real_engine, overrides, why):
+    facts = facts_for_rule(real_repo, "R-TOY-013", overrides)
+    entry = real_engine.evaluate(["R-TOY-013"], facts).rules[0]
+    assert entry.applicability_status not in (S.APPLICABLE, S.NOT_APPLICABLE), why
+    assert entry.reason_codes == [R.TRIGGER_LOGIC_NOT_MODELED], why
+
+
+def test_f21_r_toy_013_missing_facts_keep_the_canonical_fact_gate(real_repo, real_engine):
+    facts = facts_for_rule(real_repo, "R-TOY-013", {"A-TOY-019": True}, omit=("A-TOY-026",))
+    entry = real_engine.evaluate(["R-TOY-013"], facts).rules[0]
+    assert entry.applicability_status is S.NEEDS_INFO
+    assert R.MISSING_REQUIRED_FACTS in entry.reason_codes
+    assert "A-TOY-026" in entry.missing_attribute_ids
+
+
+def test_f21_r_toy_013_voltage_threshold_has_no_closed_domain(real_repo):
+    """Documents why the <= 30 V rms exclusion cannot be modeled with the approved facts."""
+    voltage = real_repo.get_attribute("A-TOY-026")
+    assert voltage is not None
+    assert voltage.data_type == "number"
+    assert canonical_domain(voltage) is None
+
+
+def test_f21_r_toy_013_never_reaches_risk_high_or_obligation_actions(real_repo, real_engine):
+    from src.services.actions import ActionEngine, ActionType
+    from src.services.cost import unassessed_cost_assessment
+    from src.services.risk import RiskEngine, RiskLevel
+
+    rules = [real_repo.get_rule("R-TOY-013")]
+    facts = facts_for_rule(real_repo, "R-TOY-013", {"A-TOY-019": True, "A-TOY-026": 12})
+    applicability = real_engine.evaluate(["R-TOY-013"], facts)
+    risk = RiskEngine(real_repo).assess(rules, applicability)
+    assert risk.items
+    assert all(item.risk_level is not RiskLevel.HIGH for item in risk.items)
+    plan = ActionEngine().assess(
+        CategoryResult(
+            category="childrens_toys",
+            category_source=CategorySource.HUMAN_CONFIRMED,
+            category_status=CategoryStatus.RESOLVED,
+        ),
+        applicability,
+        risk,
+        unassessed_cost_assessment("no_data"),
+        rules,
+    )
+    assert not [
+        item for item in plan.items if item.action_type is ActionType.CURRENT_OBLIGATION
+    ]
+    review = [
+        item
+        for item in plan.items
+        if item.rule_id == "R-TOY-013" and item.action_type is ActionType.HUMAN_REVIEW
+    ]
+    assert review
+    assert review[0].reason_code == "TRIGGER_LOGIC_NOT_MODELED"
+
+
+# =========================================================================== #
+# F.20 TriggerSpec V2: AND conditions with three-valued resolution
+# =========================================================================== #
+V2_SPEC_RULES: tuple[str, ...] = ("R-ELEC-005", "R-ELEC-009", "R-TOY-012")
+
+
+@pytest.mark.parametrize("rule_id", V2_SPEC_RULES)
+def test_f20_v2_specs_are_condition_form(real_repo, rule_id):
+    spec = TRIGGER_SPECS[rule_id]
+    assert spec.required_conditions
+    assert not spec.branches
+    assert spec.deciding_attribute_ids == [c.attribute_id for c in spec.required_conditions]
+    for condition in spec.required_conditions:
+        assert condition.attribute_id in real_repo.get_rule(rule_id).required_attribute_ids
+        assert rule_id in real_repo.get_attribute(condition.attribute_id).triggered_rule_ids
+
+
+@pytest.mark.parametrize("rule_id", V2_SPEC_RULES)
+def test_f20_v2_specs_validate_cleanly(real_repo, rule_id):
+    assert _spec_problems(real_repo, TRIGGER_SPECS[rule_id]) == []
+
+
+def test_f20_v1_specs_have_no_required_conditions(real_repo):
+    for rule_id in ("R-TOY-010", "R-TOY-011", "R-ELEC-002", "R-ELEC-001"):
+        assert TRIGGER_SPECS[rule_id].branches
+        assert not TRIGGER_SPECS[rule_id].required_conditions
+        assert _spec_problems(real_repo, TRIGGER_SPECS[rule_id]) == []
+
+
+# -- R-ELEC-005 (EQ on the authorization-path enum) ------------------------- #
+def test_f20_elec005_sdoc_is_applicable(real_repo, real_engine):
+    entry = real_engine.evaluate(
+        ["R-ELEC-005"], facts_for_rule(real_repo, "R-ELEC-005", {"A-ELEC-023": "SDoC"})
+    ).rules[0]
+    assert entry.applicability_status == S.APPLICABLE
+    assert entry.reason_codes == [R.TRIGGER_SATISFIED]
+    assert entry.evaluated_attribute_ids == ["A-ELEC-023"]
+
+
+@pytest.mark.parametrize("path", ["certification", "no authorization required"])
+def test_f20_elec005_other_paths_are_not_applicable(real_repo, real_engine, path):
+    entry = real_engine.evaluate(
+        ["R-ELEC-005"], facts_for_rule(real_repo, "R-ELEC-005", {"A-ELEC-023": path})
+    ).rules[0]
+    assert entry.applicability_status == S.NOT_APPLICABLE
+    assert entry.reason_codes == [R.TRIGGER_NOT_SATISFIED]
+
+
+def test_f20_elec005_unknown_path_is_needs_info(real_repo, real_engine):
+    entry = real_engine.evaluate(
+        ["R-ELEC-005"], facts_for_rule(real_repo, "R-ELEC-005", {"A-ELEC-023": "unknown"})
+    ).rules[0]
+    assert entry.applicability_status == S.NEEDS_INFO
+    assert entry.reason_codes == [R.MISSING_REQUIRED_FACTS]
+    assert "A-ELEC-023" in entry.missing_attribute_ids
+
+
+def test_f20_elec005_missing_path_fact_is_gated_by_g5(real_repo, real_engine):
+    facts = facts_for_rule(real_repo, "R-ELEC-005", omit=("A-ELEC-023",))
+    entry = real_engine.evaluate(["R-ELEC-005"], facts).rules[0]
+    assert entry.applicability_status == S.NEEDS_INFO
+    assert entry.applicability_status not in (S.APPLICABLE, S.NOT_APPLICABLE)
+    assert "A-ELEC-023" in entry.missing_attribute_ids
+
+
+# -- R-ELEC-009 (IN on the module-status enum) ------------------------------ #
+@pytest.mark.parametrize("status", ["fully certified module", "limited modular approval"])
+def test_f20_elec009_module_paths_are_applicable(real_repo, real_engine, status):
+    entry = real_engine.evaluate(
+        ["R-ELEC-009"], facts_for_rule(real_repo, "R-ELEC-009", {"A-ELEC-007": status})
+    ).rules[0]
+    assert entry.applicability_status == S.APPLICABLE
+    assert entry.reason_codes == [R.TRIGGER_SATISFIED]
+
+
+def test_f20_elec009_custom_radio_is_not_applicable(real_repo, real_engine):
+    entry = real_engine.evaluate(
+        ["R-ELEC-009"], facts_for_rule(real_repo, "R-ELEC-009", {"A-ELEC-007": "custom radio"})
+    ).rules[0]
+    assert entry.applicability_status == S.NOT_APPLICABLE
+    assert entry.reason_codes == [R.TRIGGER_NOT_SATISFIED]
+
+
+def test_f20_elec009_unknown_module_status_is_review_required(real_repo, real_engine):
+    entry = real_engine.evaluate(
+        ["R-ELEC-009"], facts_for_rule(real_repo, "R-ELEC-009", {"A-ELEC-007": "unknown"})
+    ).rules[0]
+    assert entry.applicability_status == S.REVIEW_REQUIRED
+    assert entry.reason_codes == [R.MISSING_REQUIRED_FACTS]
+    assert "A-ELEC-007" in entry.missing_attribute_ids
+
+
+# -- R-TOY-012 (two-condition AND) ----------------------------------------- #
+def test_f20_toy012_both_predicates_true_is_applicable(real_repo, real_engine):
+    entry = real_engine.evaluate(
+        ["R-TOY-012"],
+        facts_for_rule(real_repo, "R-TOY-012", {"A-TOY-016": True, "A-TOY-018": True}),
+    ).rules[0]
+    assert entry.applicability_status == S.APPLICABLE
+    assert entry.reason_codes == [R.TRIGGER_SATISFIED]
+    assert entry.evaluated_attribute_ids == ["A-TOY-016", "A-TOY-018"]
+
+
+@pytest.mark.parametrize("false_attribute", ["A-TOY-016", "A-TOY-018"])
+def test_f20_toy012_any_false_predicate_is_not_applicable(real_repo, real_engine, false_attribute):
+    overrides = {"A-TOY-016": True, "A-TOY-018": True, false_attribute: False}
+    entry = real_engine.evaluate(
+        ["R-TOY-012"], facts_for_rule(real_repo, "R-TOY-012", overrides)
+    ).rules[0]
+    assert entry.applicability_status == S.NOT_APPLICABLE
+    assert entry.reason_codes == [R.TRIGGER_NOT_SATISFIED]
+
+
+@pytest.mark.parametrize("missing_attribute", ["A-TOY-016", "A-TOY-018"])
+def test_f20_toy012_missing_predicate_never_gets_a_verdict(real_repo, real_engine, missing_attribute):
+    facts = facts_for_rule(real_repo, "R-TOY-012", omit=(missing_attribute,))
+    entry = real_engine.evaluate(["R-TOY-012"], facts).rules[0]
+    assert entry.applicability_status not in (S.APPLICABLE, S.NOT_APPLICABLE)
+    assert missing_attribute in entry.missing_attribute_ids
+
+
+# -- three-valued resolution unit tests ------------------------------------ #
+def _v2_index(facts):
+    return index_facts(_REAL_REPO, facts)
+
+
+def test_f20_condition_state_three_values(real_repo):
+    spec = TRIGGER_SPECS["R-TOY-012"]
+    yes = _v2_index(facts_for_rule(real_repo, "R-TOY-012", {"A-TOY-016": True, "A-TOY-018": True}))
+    no = _v2_index(facts_for_rule(real_repo, "R-TOY-012", {"A-TOY-016": False, "A-TOY-018": True}))
+    absent = _v2_index([make_fact("A-TOY-016", True)])
+    assert [_condition_state(yes, c) for c in spec.required_conditions] == [
+        ConditionState.SATISFIED, ConditionState.SATISFIED,
+    ]
+    assert _condition_state(no, spec.required_conditions[0]) is ConditionState.NOT_SATISFIED
+    assert _condition_state(absent, spec.required_conditions[1]) is ConditionState.UNRESOLVED
+    assert _resolve_required_conditions(yes, spec) is TriggerOutcome.TRIGGER_SATISFIED
+    assert _resolve_required_conditions(no, spec) is TriggerOutcome.TRIGGER_NOT_SATISFIED
+    assert _resolve_required_conditions(absent, spec) is TriggerOutcome.TRIGGER_UNRESOLVED
+
+
+def test_f20_false_predicate_dominates_an_unresolved_predicate(real_repo):
+    spec = TRIGGER_SPECS["R-TOY-012"]
+    index = _v2_index([make_fact("A-TOY-016", False)])
+    assert _resolve_required_conditions(index, spec) is TriggerOutcome.TRIGGER_NOT_SATISFIED
+
+
+def test_f20_unknown_enum_member_is_unresolved_not_false(real_repo):
+    spec = TRIGGER_SPECS["R-ELEC-009"]
+    index = _v2_index(facts_for_rule(real_repo, "R-ELEC-009", {"A-ELEC-007": "unknown"}))
+    assert _condition_state(index, spec.required_conditions[0]) is ConditionState.UNRESOLVED
+    uncertain = _v2_index(facts_for_rule(real_repo, "R-ELEC-005", {"A-ELEC-023": "uncertain"}))
+    assert (
+        _condition_state(uncertain, TRIGGER_SPECS["R-ELEC-005"].required_conditions[0])
+        is ConditionState.UNRESOLVED
+    )
+
+
+def test_f20_v2_resolution_is_fact_order_independent(real_repo):
+    spec = TRIGGER_SPECS["R-TOY-012"]
+    facts = facts_for_rule(real_repo, "R-TOY-012", {"A-TOY-016": True, "A-TOY-018": True})
+    forward = _resolve_required_conditions(_v2_index(facts), spec)
+    reversed_outcome = _resolve_required_conditions(_v2_index(list(reversed(facts))), spec)
+    assert forward is reversed_outcome is TriggerOutcome.TRIGGER_SATISFIED
+
+
+@pytest.mark.parametrize("rule_id", V2_SPEC_RULES)
+def test_f20_v2_invalid_and_contradictory_inputs_stay_fail_closed(real_repo, real_engine, rule_id):
+    attribute_id = TRIGGER_SPECS[rule_id].required_conditions[0].attribute_id
+    attribute = real_repo.get_attribute(attribute_id)
+
+    invalid = real_engine.evaluate(
+        [rule_id], facts_for_rule(real_repo, rule_id, {attribute_id: "not-a-valid-value"})
+    ).rules[0]
+    assert invalid.applicability_status == S.REVIEW_REQUIRED
+    assert R.INVALID_FACT_VALUE in invalid.reason_codes
+
+    if attribute.data_type == "boolean":
+        first, second = True, False
+    else:
+        first, second = attribute.allowed_values[0], attribute.allowed_values[-1]
+    facts = facts_for_rule(real_repo, rule_id, {attribute_id: first})
+    facts.append(make_fact(attribute_id, second))
+    contradictory = real_engine.evaluate([rule_id], facts).rules[0]
+    assert contradictory.applicability_status == S.REVIEW_REQUIRED
+    assert R.CONTRADICTORY_FACTS in contradictory.reason_codes
+    assert contradictory.applicability_status not in (S.APPLICABLE, S.NOT_APPLICABLE)
+
+
+def test_f20_v2_evidence_and_lifecycle_gates_still_precede(real_repo):
+    for rule_id in V2_SPEC_RULES:
+        rule = real_repo.get_rule(rule_id)
+        attribute_id = TRIGGER_SPECS[rule_id].required_conditions[0].attribute_id
+        for overrides, expected in (
+            ({"evidence_status": EvidenceStatus.UNVERIFIED}, R.EVIDENCE_NOT_VERIFIED),
+            ({"rule_status": RuleStatus.PROPOSED}, R.LIFECYCLE_PROPOSED),
+        ):
+            stub = StubRepository(
+                rules=[rule.model_copy(update=overrides)],
+                attributes=[real_repo.get_attribute(attribute_id)],
+            )
+            entry = ApplicabilityEngine(stub).evaluate(
+                [rule_id], [make_fact(attribute_id, True)]
+            ).rules[0]
+            assert entry.applicability_status == S.REVIEW_REQUIRED
+            assert entry.reason_codes[0] == expected
+
+
+# -- V2 validation failures ------------------------------------------------ #
+def _v2_spec(**overrides) -> TriggerSpec:
+    defaults = dict(
+        rule_id="R-TOY-012",
+        deciding_attribute_ids=["A-TOY-016", "A-TOY-018"],
+        rationale="test",
+        required_conditions=[
+            TriggerCondition(attribute_id="A-TOY-016", operator=TriggerOperator.EQ, expected=True),
+            TriggerCondition(attribute_id="A-TOY-018", operator=TriggerOperator.EQ, expected=True),
+        ],
+    )
+    defaults.update(overrides)
+    return TriggerSpec(**defaults)
+
+
+def test_f20_v2_rejects_both_forms(real_repo):
+    spec = _v2_spec(
+        branches=[branch("A-TOY-016", TriggerOperator.EQ, True, TriggerOutcome.TRIGGER_SATISFIED)]
+    )
+    assert any("not both" in p for p in _spec_problems(real_repo, spec))
+
+
+def test_f20_v2_rejects_neither_form(real_repo):
+    spec = _v2_spec(required_conditions=[])
+    assert any("no branches and no required conditions" in p for p in _spec_problems(real_repo, spec))
+
+
+def test_f20_v2_rejects_unrequired_attribute(real_repo):
+    spec = _v2_spec(
+        deciding_attribute_ids=["A-TOY-016", "A-TOY-021"],
+        required_conditions=[
+            TriggerCondition(attribute_id="A-TOY-016", operator=TriggerOperator.EQ, expected=True),
+            TriggerCondition(attribute_id="A-TOY-021", operator=TriggerOperator.EQ, expected="none"),
+        ],
+    )
+    assert any("is not in rule.required_attribute_ids" in p for p in _spec_problems(real_repo, spec))
+
+
+def test_f20_v2_rejects_undeclared_attribute():
+    """Every approved rule's real attributes declare it, so the guard is exercised with a stub."""
+    repo = StubRepository(
+        rules=[make_rule("R-TOY-012", ["A-TOY-016", "A-TOY-018"])],
+        attributes=[make_attribute("A-TOY-016", "boolean"), make_attribute("A-TOY-018", "boolean")],
+    )
+    problems = _spec_problems(repo, _v2_spec())
+    assert any("does not declare this rule" in p for p in problems)
+
+
+def test_f20_v2_rejects_value_outside_domain(real_repo):
+    spec = _v2_spec(
+        deciding_attribute_ids=["A-ELEC-023"],
+        rule_id="R-ELEC-005",
+        required_conditions=[
+            TriggerCondition(attribute_id="A-ELEC-023", operator=TriggerOperator.EQ, expected="nope")
+        ],
+    )
+    assert any("outside the canonical domain" in p for p in _spec_problems(real_repo, spec))
+
+
+def test_f20_v2_rejects_empty_in_list(real_repo):
+    spec = _v2_spec(required_conditions=[
+        TriggerCondition(attribute_id="A-TOY-016", operator=TriggerOperator.IN, expected=[]),
+    ])
+    assert any("non-empty list of scalars" in p for p in _spec_problems(real_repo, spec))
+
+
+def test_f20_v2_rejects_duplicate_condition_attribute(real_repo):
+    spec = _v2_spec(required_conditions=[
+        TriggerCondition(attribute_id="A-TOY-016", operator=TriggerOperator.EQ, expected=True),
+        TriggerCondition(attribute_id="A-TOY-016", operator=TriggerOperator.EQ, expected=True),
+    ])
+    assert any("repeats attribute" in p for p in _spec_problems(real_repo, spec))
+
+
+def test_f20_v2_rejects_no_closed_domain(real_repo):
+    spec = _v2_spec(
+        rule_id="R-TOY-012",
+        deciding_attribute_ids=["A-ELEC-017"],
+        required_conditions=[
+            TriggerCondition(attribute_id="A-ELEC-017", operator=TriggerOperator.EQ, expected="x")
+        ],
+    )
+    assert any("no closed canonical domain" in p for p in _spec_problems(real_repo, spec))
+
+
+@pytest.mark.parametrize(
+    ("rule_id", "attribute_id", "value"),
+    [("R-ELEC-005", "A-ELEC-023", "unknown"), ("R-ELEC-009", "A-ELEC-007", "unknown")],
+)
+def test_f20_v2_unresolved_trigger_never_reaches_risk_high(
+    real_repo, real_engine, rule_id, attribute_id, value
+):
+    """The V2 unresolved path must not create a confirmed current obligation downstream."""
+    from src.services.risk import RiskEngine, RiskLevel
+
+    rules = [real_repo.get_rule(rule_id)]
+    applicability = real_engine.evaluate(
+        [rule_id], facts_for_rule(real_repo, rule_id, {attribute_id: value})
+    )
+    risk = RiskEngine(real_repo).assess(rules, applicability)
+    assert risk.items
+    assert all(item.risk_level is not RiskLevel.HIGH for item in risk.items)
+
+
+def test_f20_v2_false_predicate_produces_no_risk_item(real_repo, real_engine):
+    from src.services.risk import RiskEngine
+
+    rules = [real_repo.get_rule("R-TOY-012")]
+    applicability = real_engine.evaluate(
+        ["R-TOY-012"], facts_for_rule(real_repo, "R-TOY-012", {"A-TOY-016": True, "A-TOY-018": False})
+    )
+    risk = RiskEngine(real_repo).assess(rules, applicability)
+    assert risk.items == []
+
+
+def test_f20_v2_legacy_specs_are_unaffected(real_repo, real_engine):
+    """The three original specs keep their exact positive / negative / missing behavior."""
+    cases = (
+        ("R-TOY-010", "A-TOY-012"),
+        ("R-TOY-011", "A-TOY-015"),
+        ("R-ELEC-002", "A-ELEC-002"),
+    )
+    for rule_id, attribute_id in cases:
+        for value, status, code in (
+            (True, S.APPLICABLE, R.TRIGGER_SATISFIED),
+            (False, S.NOT_APPLICABLE, R.TRIGGER_NOT_SATISFIED),
+        ):
+            entry = real_engine.evaluate(
+                [rule_id], facts_for_rule(real_repo, rule_id, {attribute_id: value})
+            ).rules[0]
+            assert entry.applicability_status == status
+            assert entry.reason_codes == [code]
+        missing = real_engine.evaluate(
+            [rule_id], facts_for_rule(real_repo, rule_id, omit=(attribute_id,))
+        ).rules[0]
+        assert missing.applicability_status not in (S.APPLICABLE, S.NOT_APPLICABLE)
 
 
 # =========================================================================== #

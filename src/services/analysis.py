@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from src.models import ComplianceRule, EvidenceStatus, PolicySource, RuleStatus
 from src.repositories.base import ComplianceRepository
+from src.services.actions import ActionEngine, ActionPlan, unassessed_action_plan
 from src.services.applicability import (
     ApplicabilityEngine,
     ApplicabilityReasonCode,
@@ -132,6 +133,9 @@ class AnalysisResult(BaseModel):
     # is True only for a human-confirmed supported category. ``total_available`` is
     # always False in Cost v1 and there is deliberately no total field.
     cost: CostAssessment | None = None
+    # Canonical deterministic recommended actions. A sibling of ``review.status``: it
+    # never reads and never changes the compliance review status.
+    actions: ActionPlan | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return self.model_dump(mode="json")
@@ -148,6 +152,8 @@ class AnalysisService:
         self._risk_engine = RiskEngine(repository)
         # Read-only deterministic category-level cost engine over the same repository.
         self._cost_engine = CostEngine(repository)
+        # Pure deterministic action engine over the canonical results assembled below.
+        self._action_engine = ActionEngine()
 
     def analyze(
         self,
@@ -173,6 +179,8 @@ class AnalysisService:
                 risk=unassessed_assessment("unresolved"),
                 # Cost is not assessed either; the CostEngine is never called here.
                 cost=unassessed_cost_assessment("unresolved"),
+                # No canonical action may be produced before a category exists.
+                actions=unassessed_action_plan("unresolved"),
             )
         if status == CategoryStatus.UNSUPPORTED:
             return AnalysisResult(
@@ -188,6 +196,9 @@ class AnalysisService:
                 # Explicitly unsupported: the CostEngine is never asked for the raw
                 # "unsupported" cost-data category, so COST-005 can never surface.
                 cost=unassessed_cost_assessment(
+                    "unsupported", category=category_result.category
+                ),
+                actions=unassessed_action_plan(
                     "unsupported", category=category_result.category
                 ),
             )
@@ -225,6 +236,18 @@ class AnalysisService:
         else:
             cost = unassessed_cost_assessment("unconfirmed", category=category_result.category)
 
+        # Recommended actions are derived only from the canonical results above plus the evaluated
+        # rule list (for verbatim canonical text and provenance). Action availability never changes
+        # ``review.status``: the two are sibling outputs.
+        if applicability is not None:
+            action_plan = self._action_engine.assess(
+                category_result, applicability, risk, cost, rules
+            )
+        else:
+            action_plan = unassessed_action_plan(
+                "unconfirmed", category=category_result.category
+            )
+
         # ``not_evaluated`` reports only what was NOT evaluated: a component that actually ran is
         # removed and every remaining entry is preserved. A fresh copy is always used, so the
         # module-level template is never mutated.
@@ -260,6 +283,7 @@ class AnalysisService:
             applicability=applicability,
             risk=risk,
             cost=cost,
+            actions=action_plan,
         )
 
     def evidence_for(self, rule_id: str) -> dict[str, Any]:

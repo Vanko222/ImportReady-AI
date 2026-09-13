@@ -33,6 +33,8 @@ from src.services.classification import (
     allowed_category_values,
 )
 from src.services.cost import CostCalculationStatus, CostItem
+from src.services.actions import ActionPriority, ActionType, unassessed_action_plan
+from src.services import actions as actions_module
 from src.services.orchestrator import AgentRunOutcome, Orchestrator
 from src.services.risk import RiskLevel, RiskReasonCode
 from src.state import FactOrigin, ProductFact
@@ -236,9 +238,15 @@ def test_placeholder_removed_and_risk_and_cost_evaluated():
 
 
 def test_phase_2a_engine_behavior_unchanged():
-    assert set(TRIGGER_SPECS) == {"R-TOY-010", "R-TOY-011", "R-ELEC-002"}
+    assert set(TRIGGER_SPECS) == {
+        "R-ELEC-001", "R-ELEC-002", "R-ELEC-005", "R-ELEC-009", "R-TOY-010", "R-TOY-011",
+        "R-TOY-012",
+    }
+    assert "R-ELEC-003" not in TRIGGER_SPECS
+    assert "R-TOY-005" not in TRIGGER_SPECS
+    assert "R-TOY-013" not in TRIGGER_SPECS
     assert "R-ELEC-012" not in TRIGGER_SPECS
-    assert len(TRIGGER_SPECS) == 3
+    assert len(TRIGGER_SPECS) == 7
     # direct engine use still agrees with the integrated path
     entry = _rule_entry(_SERVICE.analyze(_resolved("childrens_toys"), _toy011_facts(True)), "R-TOY-011")
     assert entry.applicability_status == S.APPLICABLE
@@ -1309,13 +1317,14 @@ def test_cost_is_independent_of_applicability_and_risk_outcomes():
     not_applicable = _SERVICE.analyze(_resolved("small_consumer_electronics"), _elec002_facts(False))
     missing_facts = _SERVICE.analyze(_resolved("small_consumer_electronics"), [])
 
-    # the three runs really do differ in their deterministic applicability/risk outcome
+    # the three runs really do differ in their deterministic applicability outcome for R-ELEC-002
     assert _status(applicable, "R-ELEC-002") == "APPLICABLE"
     assert _status(not_applicable, "R-ELEC-002") == "NOT_APPLICABLE"
     assert _status(missing_facts, "R-ELEC-002") == "REVIEW_REQUIRED"
-    assert applicable.risk.level is RiskLevel.HIGH
-    assert not_applicable.risk.level is not RiskLevel.HIGH
-    assert missing_facts.risk.level is not RiskLevel.HIGH
+    assert [
+        item.risk_level for item in applicable.risk.items if item.rule_id == "R-ELEC-002"
+    ] == [RiskLevel.HIGH]
+    assert not [item for item in not_applicable.risk.items if item.rule_id == "R-ELEC-002"]
 
     baseline = applicable.cost.model_dump(mode="json")
     assert not_applicable.cost.model_dump(mode="json") == baseline
@@ -1405,3 +1414,184 @@ def test_cost_serialization_contract():
     for token in ("NaN", "Infinity", "-Infinity"):
         assert token not in text, token
     assert payload["cost"]["currencies"] == ["HKD", "USD"]
+
+
+# =========================================================================== #
+# Phase 3: deterministic Action Plan integration
+# =========================================================================== #
+
+
+def _action_ids(analysis) -> list[str]:
+    assert analysis.actions is not None, "actions must be attached on every path"
+    return [item.action_id for item in analysis.actions.items]
+
+
+def test_actions_resolved_category_is_assessed():
+    analysis = _SERVICE.analyze(_resolved("small_consumer_electronics"), _elec002_facts(True))
+    assert analysis.actions.assessed is True
+    assert analysis.actions.category == "small_consumer_electronics"
+    assert analysis.actions.items
+    assert analysis.actions.requires_human_review is True
+    payload = analysis.to_dict()["actions"]
+    assert payload["assessed"] is True
+    assert sum(payload["counts"].values()) == len(payload["items"])
+    assert sum(payload["priority_counts"].values()) == len(payload["items"])
+
+
+def test_actions_surface_the_canonical_current_obligation_verbatim():
+    analysis = _SERVICE.analyze(_resolved("small_consumer_electronics"), _elec002_facts(True))
+    ids = _action_ids(analysis)
+    for suffix in ("TESTS", "DOCUMENTS", "ACTIONS", "LABELING"):
+        assert f"ACT-RULE-R-ELEC-002-{suffix}" in ids
+    rule = _REPO.get_rule("R-ELEC-002")
+    items = [i for i in analysis.actions.items if i.rule_id == "R-ELEC-002"]
+    assert {i.canonical_text for i in items} <= {
+        rule.required_tests, rule.required_documents, rule.seller_importer_actions,
+        rule.labeling_manual_requirements,
+    }
+
+
+def test_actions_r_elec_012_stays_review_only():
+    facts = _facts(_ELEC012_REQUIRED, overrides={"A-ELEC-011": "lithium ion"})
+    analysis = _SERVICE.analyze(_resolved("small_consumer_electronics"), facts)
+    items = [i for i in analysis.actions.items if i.rule_id == "R-ELEC-012"]
+    assert len(items) == 1
+    assert items[0].action_id == "ACT-REVIEW-RULE-R-ELEC-012-TRIGGER_LOGIC_NOT_MODELED"
+    assert items[0].action_type is ActionType.HUMAN_REVIEW
+    assert items[0].priority is ActionPriority.REVIEW
+    rule = _REPO.get_rule("R-ELEC-012")
+    assert rule.required_tests not in json.dumps(analysis.to_dict()["actions"])
+
+
+@pytest.mark.parametrize(
+    "category_result, marker",
+    [
+        (
+            CategoryResult(
+                category=None,
+                category_source=CategorySource.UNRESOLVED,
+                category_status=CategoryStatus.NEEDS_INFO,
+            ),
+            "unresolved",
+        ),
+        (
+            CategoryResult(
+                category="unsupported",
+                category_source=CategorySource.HUMAN_CONFIRMED,
+                category_status=CategoryStatus.UNSUPPORTED,
+            ),
+            "not available",
+        ),
+        (_agent_category("small_consumer_electronics"), "human confirmation"),
+    ],
+)
+def test_actions_unassessed_paths_never_produce_items(category_result, marker):
+    analysis = _SERVICE.analyze(category_result, _elec002_facts(True))
+    assert analysis.actions.assessed is False
+    assert analysis.actions.items == []
+    assert analysis.actions.requires_human_review is True
+    assert marker in " ".join(analysis.actions.notes).lower()
+    payload = analysis.to_dict()["actions"]
+    assert payload["items"] == []
+    assert sum(payload["counts"].values()) == 0
+    for cost_id in ("C-T-001", "C-E-001", "COST-002"):
+        assert cost_id not in json.dumps(payload)
+
+
+def test_actions_never_change_review_status_or_triggers(monkeypatch):
+    """The action channel is a sibling output: removing it changes nothing else."""
+    facts = _toy011_facts(True)
+    analysis = _SERVICE.analyze(_resolved("childrens_toys"), facts)
+    assert analysis.actions.assessed is True
+    assert analysis.review.status == "NEEDS_INFO"
+
+    class _NoActionEngine:
+        def assess(self, *args, **kwargs):
+            return unassessed_action_plan("unconfirmed")
+
+    monkeypatch.setattr(_SERVICE, "_action_engine", _NoActionEngine())
+    without_actions = _SERVICE.analyze(_resolved("childrens_toys"), facts)
+    assert without_actions.actions.assessed is False
+    assert without_actions.actions.items == []
+    # nothing else moved
+    assert without_actions.review.status == analysis.review.status
+    assert without_actions.review.triggers == analysis.review.triggers
+    assert without_actions.review.reviewer_actions == analysis.review.reviewer_actions
+    assert without_actions.unknown.not_evaluated == analysis.unknown.not_evaluated
+    assert without_actions.risk.model_dump() == analysis.risk.model_dump()
+    assert without_actions.cost.model_dump() == analysis.cost.model_dump()
+    assert without_actions.applicability.model_dump() == analysis.applicability.model_dump()
+
+    triggers = " ".join(analysis.review.triggers)
+    for forbidden in ("action", "cost_not_implemented", "risk_cost_not_implemented"):
+        assert forbidden not in triggers
+
+
+def test_actions_serialization_contract():
+    analysis = _SERVICE.analyze(_resolved("dual"), _elec002_facts(True))
+    payload = analysis.to_dict()["actions"]
+    assert set(payload) == {
+        "assessed", "category", "items", "counts", "priority_counts", "requires_human_review",
+        "notes",
+    }
+    for forbidden in ("completed_at", "status", "waived", "total", "approved"):
+        assert forbidden not in payload
+    text = json.dumps(payload)
+    for token in ("NaN", "Infinity", "-Infinity"):
+        assert token not in text
+    item_fields = set(payload["items"][0])
+    assert "action_id" in item_fields and "canonical_text" in item_fields
+
+
+def test_agent_prose_cannot_change_the_action_plan():
+    facts = _elec002_facts(True)
+    claim = (
+        "Total compliance cost is $50. All costs are mandatory and payable. "
+        "I marked every action complete and approved the import."
+    )
+
+    def _run(agent_runner=None):
+        return Orchestrator(HumanClassifier(allowed_category_values(_REPO)), _SERVICE).run(
+            "Bluetooth speaker",
+            provided_category="small_consumer_electronics",
+            product_facts=facts,
+            agent_runner=agent_runner,
+        )
+
+    def action_claim_runner(context, category_result):
+        tools, state = build_tools(_SERVICE, category_result, context.case.product_facts)
+        output = tools[0](context.case.raw_product_input or "x")
+        return AgentRunOutcome(
+            status="SUCCEEDED",
+            stop_reason="end_turn",
+            text=claim,
+            tool_calls=list(state.call_names),
+            error_type=None,
+            analysis_result=output["result"],
+        )
+
+    offline = _run()
+    agent = _run(action_claim_runner)
+    fallback = _run(_Runner("FAILED"))
+
+    assert agent.result["actions"] == offline.result["actions"]
+    assert fallback.result["actions"] == offline.result["actions"]
+    assert offline.result["actions"]["assessed"] is True
+    serialized = json.dumps(offline.result["actions"])
+    for sentence in ("$50", "mandatory and payable", "approved the import", "I marked"):
+        assert sentence not in serialized
+    # canonical authorised text may legitimately contain words like "complete"; every surfaced text
+    # must still be provenance-locked to approved rule data or a fixed cost sentence
+    approved = {
+        getattr(rule, field)
+        for rule in _REPO.rules
+        for field in ("requirement", "trigger_conditions", "required_tests", "required_documents",
+                      "seller_importer_actions", "labeling_manual_requirements",
+                      "clarification_question", "risk_if_missing", "applicability_notes")
+        if isinstance(getattr(rule, field), str)
+    } | set(actions_module._COST_FOLLOWUP_TEXT.values())
+    surfaced = {
+        item["canonical_text"] for item in offline.result["actions"]["items"]
+        if item.get("canonical_text")
+    }
+    assert surfaced <= approved

@@ -76,6 +76,23 @@ class TriggerCombine(str, Enum):
 class TriggerOutcome(str, Enum):
     TRIGGER_SATISFIED = "TRIGGER_SATISFIED"
     TRIGGER_NOT_SATISFIED = "TRIGGER_NOT_SATISFIED"
+    # V2 only: no required condition is definitively false, but at least one required canonical
+    # value is not established (an approved "unknown"/"uncertain" enum member, or no value at all).
+    # Never silently treated as satisfied or as not satisfied.
+    TRIGGER_UNRESOLVED = "TRIGGER_UNRESOLVED"
+
+
+class ConditionState(str, Enum):
+    """Three-valued state of one structured trigger predicate."""
+
+    SATISFIED = "SATISFIED"
+    NOT_SATISFIED = "NOT_SATISFIED"
+    UNRESOLVED = "UNRESOLVED"
+
+
+# Exact approved enum members that mean "not established". This is vocabulary matching against an
+# attribute's approved allowed_values, never prose matching, and never a hidden default.
+_UNRESOLVED_CANONICAL_VALUES: frozenset[str] = frozenset({"unknown", "uncertain"})
 
 
 class FactIssueCode(str, Enum):
@@ -142,10 +159,23 @@ class TriggerBranch(BaseModel):
 
 
 class TriggerSpec(BaseModel):
+    """A deterministic trigger specification. Two backwards-compatible forms exist.
+
+    * **V1 (``branches``)** - one deciding attribute whose closed canonical domain is partitioned by
+      single-condition branches. Unchanged since the original approved specs.
+    * **V2 (``required_conditions``)** - a list of structured predicates joined by AND. Every
+      predicate must hold for ``TRIGGER_SATISFIED``; any definitively false predicate gives
+      ``TRIGGER_NOT_SATISFIED``; otherwise the trigger is **UNRESOLVED** (canonical NEEDS_INFO /
+      REVIEW_REQUIRED), never a verdict. Unknown/uncertain canonical values are never read as false.
+
+    No prose is parsed, no expression is evaluated, and no default is assumed in either form.
+    """
+
     rule_id: str
     deciding_attribute_ids: list[str] = Field(default_factory=list)
     rationale: str
     branches: list[TriggerBranch] = Field(default_factory=list)
+    required_conditions: list[TriggerCondition] = Field(default_factory=list)
 
 
 # The only two multi_select attributes whose allowed_values is descriptive or
@@ -435,7 +465,15 @@ def index_facts(
 
 
 _APPROVED_SPEC_RULE_IDS: frozenset[str] = frozenset(
-    {"R-TOY-010", "R-TOY-011", "R-ELEC-002"}
+    {
+        "R-ELEC-001",
+        "R-ELEC-002",
+        "R-ELEC-005",
+        "R-ELEC-009",
+        "R-TOY-010",
+        "R-TOY-011",
+        "R-TOY-012",
+    }
 )
 
 
@@ -474,6 +512,16 @@ def _bool_spec(rule_id: str, attribute_id: str, rationale: str) -> TriggerSpec:
 
 
 TRIGGER_SPECS: dict[str, TriggerSpec] = {
+    # V1 subject-matter presence specs: one closed-domain deciding attribute whose full canonical
+    # domain is partitioned. Every deciding attribute below is declared by the approved taxonomy as
+    # triggering the rule it decides and is a required attribute of that rule.
+    "R-ELEC-001": _bool_spec(
+        "R-ELEC-001",
+        "A-ELEC-001",
+        "Child-targeted electronics routing rule; child_targeted_electronics is the canonical "
+        "child-targeting determination declared for this rule, and the multi-factor appeal evidence "
+        "attributes (A-TOY-003) are supporting context rather than the rule's subject.",
+    ),
     "R-TOY-010": _bool_spec(
         "R-TOY-010",
         "A-TOY-012",
@@ -491,6 +539,57 @@ TRIGGER_SPECS: dict[str, TriggerSpec] = {
         "Intentional RF emission; intentional_rf_transmitter decides subject-matter "
         "presence. There is no 'unknown' branch: the canonical boolean has no "
         "'unknown' value.",
+    ),
+    # V2 AND specs: every required structured predicate must hold, an approved "unknown"/"uncertain"
+    # member leaves the trigger UNRESOLVED (never a verdict), and any definitively false predicate
+    # makes the rule not applicable.
+    "R-ELEC-005": TriggerSpec(
+        rule_id="R-ELEC-005",
+        deciding_attribute_ids=["A-ELEC-023"],
+        rationale=(
+            "The rule applies exactly when the equipment uses the SDoC authorization procedure. "
+            "A-ELEC-023 is the approved authorization-path enum: 'SDoC' satisfies the rule, "
+            "'certification' and 'no authorization required' definitively do not, and the approved "
+            "'unknown' member leaves the trigger unresolved instead of assuming a path."
+        ),
+        required_conditions=[
+            TriggerCondition(
+                attribute_id="A-ELEC-023",
+                operator=TriggerOperator.EQ,
+                expected="SDoC",
+            )
+        ],
+    ),
+    "R-ELEC-009": TriggerSpec(
+        rule_id="R-ELEC-009",
+        deciding_attribute_ids=["A-ELEC-007"],
+        rationale=(
+            "The rule applies exactly when the host uses a certified or limited-modular "
+            "transmitter. A-ELEC-007 is the approved radio-module-status enum: the two module "
+            "approval values satisfy the rule, 'custom radio' definitively does not, and the "
+            "approved 'unknown' member leaves the trigger unresolved."
+        ),
+        required_conditions=[
+            TriggerCondition(
+                attribute_id="A-ELEC-007",
+                operator=TriggerOperator.IN,
+                expected=["fully certified module", "limited modular approval"],
+            )
+        ],
+    ),
+    "R-TOY-012": TriggerSpec(
+        rule_id="R-TOY-012",
+        deciding_attribute_ids=["A-TOY-016", "A-TOY-018"],
+        rationale=(
+            "The rule applies exactly when a button/coin cell is supplied separately with the toy: "
+            "A-TOY-016 (button_or_coin_cell) AND A-TOY-018 "
+            "(battery_packaged_separately_with_product), both approved booleans declared as triggers "
+            "for this rule. Either value being false means the rule's subject is absent."
+        ),
+        required_conditions=[
+            TriggerCondition(attribute_id="A-TOY-016", operator=TriggerOperator.EQ, expected=True),
+            TriggerCondition(attribute_id="A-TOY-018", operator=TriggerOperator.EQ, expected=True),
+        ],
     ),
 }
 
@@ -521,7 +620,7 @@ def _spec_problems_inner(
     problems: list[str] = []
 
     if spec.rule_id not in _APPROVED_SPEC_RULE_IDS:
-        problems.append(f"{spec.rule_id}: rule_id is not in the approved Phase 2A spec set")
+        problems.append(f"{spec.rule_id}: rule_id is not in the approved trigger-spec set")
 
     rule = repository.get_rule(spec.rule_id)
     if rule is None:
@@ -529,6 +628,17 @@ def _spec_problems_inner(
         return problems
 
     required = list(rule.required_attribute_ids)
+
+    if spec.branches and spec.required_conditions:
+        problems.append(
+            f"{spec.rule_id}: spec must use either branches or required_conditions, not both"
+        )
+        return problems
+    if not spec.branches and not spec.required_conditions:
+        problems.append(f"{spec.rule_id}: spec has no branches and no required conditions")
+        return problems
+    if spec.required_conditions:
+        return problems + _required_condition_problems(repository, spec, required)
 
     if len(spec.deciding_attribute_ids) != 1:
         problems.append(f"{spec.rule_id}: exactly one deciding attribute is required")
@@ -628,6 +738,97 @@ def _spec_problems_inner(
     return problems
 
 
+def _required_condition_problems(
+    repository: ComplianceRepository, spec: TriggerSpec, required: list[str]
+) -> list[str]:
+    """Validation for the V2 (``required_conditions``) form.
+
+    Every predicate must reference a required attribute of the rule, that attribute must be declared
+    by the approved taxonomy as triggering this rule, and each expected value must lie inside the
+    attribute's closed canonical domain. No default or fallback assumption is permitted.
+    """
+    problems: list[str] = []
+    seen: set[str] = set()
+    if len(spec.deciding_attribute_ids) != len(spec.required_conditions):
+        problems.append(
+            f"{spec.rule_id}: deciding_attribute_ids must list exactly the condition attributes"
+        )
+    for index, condition in enumerate(spec.required_conditions):
+        attribute_id = condition.attribute_id
+        if attribute_id not in required:
+            problems.append(
+                f"{spec.rule_id}: condition {index} attribute {attribute_id} is not in "
+                "rule.required_attribute_ids"
+            )
+        if attribute_id in seen:
+            problems.append(
+                f"{spec.rule_id}: condition {index} repeats attribute {attribute_id}"
+            )
+        seen.add(attribute_id)
+
+        attribute = repository.get_attribute(attribute_id)
+        if attribute is None:
+            problems.append(
+                f"{spec.rule_id}: condition {index} attribute {attribute_id} does not resolve"
+            )
+            continue
+        if spec.rule_id not in attribute.triggered_rule_ids:
+            problems.append(
+                f"{spec.rule_id}: condition {index} attribute {attribute_id} does not declare "
+                "this rule in its triggered_rule_ids"
+            )
+        domain = canonical_domain(attribute)
+        if domain is None:
+            problems.append(
+                f"{spec.rule_id}: condition {index} attribute {attribute_id} has no closed "
+                f"canonical domain (data_type {attribute.data_type})"
+            )
+            continue
+
+        if condition.operator == TriggerOperator.EQ:
+            expected = condition.expected
+            if isinstance(expected, list) or not isinstance(expected, (bool, str, int, float)):
+                problems.append(f"{spec.rule_id}: condition {index} EQ expects a scalar")
+            elif expected not in domain:
+                problems.append(
+                    f"{spec.rule_id}: condition {index} EQ value {expected!r} is outside the "
+                    f"canonical domain of {attribute_id}"
+                )
+            elif domain == _BOOLEAN_CANONICAL_DOMAIN and not isinstance(expected, bool):
+                problems.append(
+                    f"{spec.rule_id}: condition {index} boolean attribute requires a boolean value"
+                )
+        elif condition.operator == TriggerOperator.IN:
+            expected = condition.expected
+            if (
+                not isinstance(expected, list)
+                or not expected
+                or not all(isinstance(member, (bool, str, int, float)) for member in expected)
+            ):
+                problems.append(
+                    f"{spec.rule_id}: condition {index} IN expects a non-empty list of scalars"
+                )
+            elif not set(expected) <= set(domain):
+                problems.append(
+                    f"{spec.rule_id}: condition {index} IN values fall outside the canonical "
+                    f"domain of {attribute_id}"
+                )
+            elif domain == _BOOLEAN_CANONICAL_DOMAIN and not all(
+                isinstance(member, bool) for member in expected
+            ):
+                problems.append(
+                    f"{spec.rule_id}: condition {index} boolean attribute requires boolean values"
+                )
+        else:
+            problems.append(f"{spec.rule_id}: condition {index} uses an unapproved operator")
+
+    if seen != set(spec.deciding_attribute_ids):
+        problems.append(
+            f"{spec.rule_id}: deciding_attribute_ids do not match the condition attributes"
+        )
+    return problems
+
+
 def validate_trigger_specs(repository: ComplianceRepository) -> list[str]:
     """Return all spec problems. An empty list means every spec is valid."""
     problems: list[str] = []
@@ -673,11 +874,46 @@ def _resolve_outcome(index: FactIndex, spec: TriggerSpec) -> TriggerOutcome | No
     return matches[0].outcome if len(matches) == 1 else None
 
 
+def _condition_state(index: FactIndex, condition: TriggerCondition) -> ConditionState:
+    """Three-valued state of one structured predicate. Never treats unknown/missing as false."""
+    fact = index.canonical(condition.attribute_id)
+    if fact is None:
+        return ConditionState.UNRESOLVED
+    value = fact.value
+    if isinstance(value, str) and value in _UNRESOLVED_CANONICAL_VALUES:
+        return ConditionState.UNRESOLVED
+    if condition.operator == TriggerOperator.EQ:
+        matched = _values_equal(value, condition.expected)
+    elif condition.operator == TriggerOperator.IN:
+        matched = any(_values_equal(value, member) for member in condition.expected)
+    else:  # an unapproved operator can never yield a verdict
+        return ConditionState.UNRESOLVED
+    return ConditionState.SATISFIED if matched else ConditionState.NOT_SATISFIED
+
+
+def _resolve_required_conditions(index: FactIndex, spec: TriggerSpec) -> TriggerOutcome:
+    """Three-valued AND resolution for the V2 (``required_conditions``) form.
+
+    * any predicate definitively false -> ``TRIGGER_NOT_SATISFIED``
+    * every predicate satisfied       -> ``TRIGGER_SATISFIED``
+    * otherwise                       -> ``TRIGGER_UNRESOLVED``
+    """
+    states = [_condition_state(index, condition) for condition in spec.required_conditions]
+    if any(state is ConditionState.NOT_SATISFIED for state in states):
+        return TriggerOutcome.TRIGGER_NOT_SATISFIED
+    if all(state is ConditionState.SATISFIED for state in states):
+        return TriggerOutcome.TRIGGER_SATISFIED
+    return TriggerOutcome.TRIGGER_UNRESOLVED
+
+
 @dataclass
 class GateOutcome:
     status: ApplicabilityStatus
     reason_codes: list[ApplicabilityReasonCode]
     evaluated_attribute_ids: list[str] = field(default_factory=list)
+    # V2 only: canonical attributes whose value is not established, so they are reported as
+    # information the user still has to provide or confirm.
+    unresolved_attribute_ids: list[str] = field(default_factory=list)
 
 
 def _dedupe(items: Sequence[str]) -> list[str]:
@@ -872,6 +1108,8 @@ class ApplicabilityEngine:
                 status=ApplicabilityStatus.REVIEW_REQUIRED,
                 reason_codes=[ApplicabilityReasonCode.TRIGGER_SPEC_INVALID],
             )
+        if spec.required_conditions:
+            return self._g6_required_conditions(rule, index, spec)
         outcome = _resolve_outcome(index, spec)
         if outcome is None:
             return GateOutcome(
@@ -884,10 +1122,46 @@ class ApplicabilityEngine:
             evaluated_attribute_ids=list(spec.deciding_attribute_ids),
         )
 
+    def _g6_required_conditions(
+        self, rule: ComplianceRule, index: FactIndex, spec: TriggerSpec
+    ) -> GateOutcome:
+        """V2 resolution: unresolved trigger inputs are never a verdict and never a default."""
+        outcome = _resolve_required_conditions(index, spec)
+        evaluated = list(spec.deciding_attribute_ids)
+        if outcome is TriggerOutcome.TRIGGER_UNRESOLVED:
+            unresolved = [
+                condition.attribute_id
+                for condition in spec.required_conditions
+                if _condition_state(index, condition) is ConditionState.UNRESOLVED
+            ]
+            status = (
+                ApplicabilityStatus.NEEDS_INFO
+                if rule.runtime_status_if_missing == "NEEDS_INFO"
+                else ApplicabilityStatus.REVIEW_REQUIRED
+            )
+            return GateOutcome(
+                status=status,
+                reason_codes=[ApplicabilityReasonCode.MISSING_REQUIRED_FACTS],
+                evaluated_attribute_ids=evaluated,
+                unresolved_attribute_ids=unresolved,
+            )
+        return GateOutcome(
+            status=_OUTCOME_TO_STATUS[outcome],
+            reason_codes=[ApplicabilityReasonCode(outcome.value)],
+            evaluated_attribute_ids=evaluated,
+        )
+
     def _result(
         self, rule: ComplianceRule, index: FactIndex, outcome: GateOutcome
     ) -> RuleApplicabilityResult:
         required = _dedupe(rule.required_attribute_ids)
+        missing = [a for a in required if not index.is_usable(a)]
+        # A V2 trigger input that is present but not established ("unknown"/"uncertain") is reported
+        # as information the user still has to provide or confirm. Present-and-usable facts keep
+        # their existing treatment, so nothing changes for the V1 specs.
+        for attribute_id in outcome.unresolved_attribute_ids:
+            if attribute_id not in missing:
+                missing.append(attribute_id)
         return RuleApplicabilityResult(
             rule_id=rule.rule_id,
             applicability_status=outcome.status,
@@ -895,7 +1169,7 @@ class ApplicabilityEngine:
             evidence_status=rule.evidence_status,
             rule_status=rule.rule_status,
             required_attribute_ids=required,
-            missing_attribute_ids=[a for a in required if not index.is_usable(a)],
+            missing_attribute_ids=missing,
             evaluated_attribute_ids=list(outcome.evaluated_attribute_ids),
         )
 

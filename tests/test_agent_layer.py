@@ -209,8 +209,43 @@ def test_hallucination_resistance(repo: JsonComplianceRepository) -> None:
     result = outcome.result
     assert result is not None
     assert result["review"]["status"] == "REVIEW_REQUIRED"
-    assert "compliant" not in json.dumps(result)
     assert "cost_not_implemented" not in result["review"]["triggers"]
+
+    # Every non-action field must stay free of compliance-claim language.
+    without_actions = {key: value for key, value in result.items() if key != "actions"}
+    assert "compliant" not in json.dumps(without_actions)
+
+    # The Action layer may surface approved rule text verbatim, and that approved text can itself
+    # contain the word "compliant". Any such occurrence must be provenance-locked to an approved
+    # canonical rule field - never engine-generated or Agent-generated prose.
+    approved_texts = {
+        getattr(rule, field)
+        for rule in repo.rules
+        for field in (
+            "requirement",
+            "trigger_conditions",
+            "required_tests",
+            "required_documents",
+            "seller_importer_actions",
+            "labeling_manual_requirements",
+            "clarification_question",
+            "risk_if_missing",
+            "applicability_notes",
+        )
+        if isinstance(getattr(rule, field), str)
+    }
+    surfaced = {
+        item["canonical_text"]
+        for item in result["actions"]["items"]
+        if item.get("canonical_text")
+    }
+    from src.services import actions as actions_module
+
+    approved_texts |= set(actions_module._COST_FOLLOWUP_TEXT.values())
+    assert surfaced <= approved_texts
+    flagged = {text for text in surfaced if "compliant" in text.lower()}
+    assert flagged, "expected the approved toy rule text to contain the word 'compliant'"
+    assert flagged <= approved_texts
 
 
 def test_sensitive_input_redacted() -> None:
