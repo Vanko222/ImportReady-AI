@@ -1211,3 +1211,34 @@ def test_uncertainty_preserving_templates_pass_the_a5_check() -> None:
         assert cert.check_final_response(template, review_status="REVIEW_REQUIRED") == [], template
     problems = cert.check_final_response("The product is compliant.", review_status="REVIEW_REQUIRED")
     assert any(problem.startswith("A5") for problem in problems)
+
+
+# --------------------------------------------------------------------------- #
+# 31. Lifecycle obligation guidance (A5 lifecycle sub-rule: guidance only)
+# --------------------------------------------------------------------------- #
+def test_prompt_separates_rule_ids_from_obligation_wording() -> None:
+    assert "Obligation wording is forbidden for every rule whose rule_status is NOT" in SYSTEM_PROMPT
+    assert "must never share a sentence" in SYSTEM_PROMPT
+    assert "a negation does not make it safe" in SYSTEM_PROMPT
+    assert "R-ELEC-019 is proposed and not yet in force." in SYSTEM_PROMPT
+    assert "R-ELEC-018 remains on the watchlist and is not in force." in SYSTEM_PROMPT
+    assert "should not be treated as a current requirement" in SYSTEM_PROMPT
+    assert "The rule status is unknown and further assessment is needed." in SYSTEM_PROMPT
+
+
+def test_prompt_lifecycle_guidance_labels_the_separation_as_mandatory() -> None:
+    assert "Sentence-level separation is mandatory" in SYSTEM_PROMPT
+
+
+def test_approved_lifecycle_templates_are_a5_safe() -> None:
+    """The style the prompt hands the model must itself pass the unchanged A5 detector."""
+    from src.certification import certification as cert
+
+    for template in ("R-ELEC-019 is proposed and not yet in force.",
+                     "R-ELEC-018 remains on the watchlist and is not in force.",
+                     "The rule is superseded and should not be treated as a current requirement.",
+                     "The rule status is unknown and further assessment is needed.",
+                     "Further review is required before determining current obligations."):
+        assert template in SYSTEM_PROMPT, template
+        assert cert.check_final_response(template, non_effective_rule_ids=("R-ELEC-018", "R-ELEC-019"),
+                                         review_status="REVIEW_REQUIRED") == [], template

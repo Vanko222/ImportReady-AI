@@ -927,6 +927,56 @@ def test_a5_is_not_triggered_for_a_resolved_case() -> None:
     assert not cert.check_final_response("The product is compliant.", review_status=None)
 
 
+# --------------------------------------------------------------------------- #
+# A5 lifecycle sub-rule: obligation wording for a NON-EFFECTIVE rule
+# (P3.2B guidance fix; the detector itself is unchanged)
+# --------------------------------------------------------------------------- #
+NON_EFFECTIVE = ("R-ELEC-018", "R-ELEC-019")   # WATCHLIST / PROPOSED in the canonical result
+
+
+def lifecycle_problems(text: str) -> list[str]:
+    return cert.check_final_response(text, non_effective_rule_ids=NON_EFFECTIVE,
+                                     review_status="REVIEW_REQUIRED")
+
+
+@pytest.mark.parametrize("text", [
+    "R-ELEC-019 is required.",
+    "R-ELEC-019 must comply.",
+    "R-ELEC-019 is mandatory.",
+    "R-ELEC-019 is currently effective.",
+    "R-ELEC-019 is the law.",
+    "R-ELEC-019 is proposed and further review is required.",   # rule_id + obligation, same sentence
+    "not currently effective for R-ELEC-019.",                  # a negation is still the same pairing
+])
+def test_a5_lifecycle_forbids_obligation_wording_with_the_rule_id(text: str) -> None:
+    assert any(problem.startswith("A5") for problem in lifecycle_problems(text)), text
+
+
+def test_a5_lifecycle_accepts_separated_status_and_next_step() -> None:
+    """The approved style: status in one sentence, the next step in another without the rule_id."""
+    text = ("R-ELEC-019 is proposed and not yet in force. "
+            "Further review is required before determining current obligations.")
+    assert lifecycle_problems(text) == []
+    assert lifecycle_problems("R-ELEC-019 is proposed and not yet in force.") == []
+    assert lifecycle_problems("Further review is required before determining current obligations.") == []
+
+
+@pytest.mark.parametrize("text", [
+    "R-ELEC-018 remains on the watchlist and is not in force.",
+    "The rule is superseded and should not be treated as a current requirement.",
+    "The rule status is unknown and further assessment is needed.",
+])
+def test_a5_lifecycle_accepts_the_other_non_effective_styles(text: str) -> None:
+    assert lifecycle_problems(text) == [], text
+
+
+def test_a5_lifecycle_untouched_for_an_effective_rule() -> None:
+    """A rule that is no longer non-effective may be described as currently effective, as before."""
+    assert lifecycle_problems("R-ELEC-019 is currently effective.")          # still non-effective → A5
+    assert cert.check_final_response("R-ELEC-019 is currently effective.", non_effective_rule_ids=(),
+                                     review_status="REVIEW_REQUIRED") == []
+
+
 # =========================================================================== #
 # Group 16 — gate 10 canonical preservation
 # =========================================================================== #
