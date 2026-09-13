@@ -33,6 +33,7 @@ from src.services.classification import (
     allowed_category_values,
 )
 from src.services.orchestrator import AgentRunOutcome, Orchestrator
+from src.services.risk import RiskLevel, RiskReasonCode
 from src.state import FactOrigin, ProductFact
 
 _REPO = JsonComplianceRepository()
@@ -223,10 +224,12 @@ def test_unresolved_category_yields_none_applicability(category_result):
     assert analysis.applicability is None
 
 
-def test_placeholder_removed_and_risk_cost_preserved():
+def test_placeholder_removed_and_risk_evaluated_cost_preserved():
     analysis = _SERVICE.analyze(_resolved("childrens_toys"), [])
     assert "applicability" not in analysis.unknown.not_evaluated
-    assert analysis.unknown.not_evaluated["risk"] == "NOT_EVALUATED"
+    # Deterministic risk actually ran on this RESOLVED path, so the "risk" entry
+    # is removed instead of being replaced by another sentinel.
+    assert "risk" not in analysis.unknown.not_evaluated
     assert analysis.unknown.not_evaluated["cost"] == "NOT_AVAILABLE"
 
 
@@ -561,10 +564,11 @@ def test_offline_agent_and_fallback_agree():
 # =========================================================================== #
 
 
-def test_engines_not_implemented_removed_and_risk_cost_present():
+def test_engines_not_implemented_removed_and_cost_present():
     analysis = _SERVICE.analyze(_resolved("childrens_toys"), _toy011_facts(True))
     assert "engines_not_implemented" not in analysis.review.triggers
-    assert "risk_cost_not_implemented" in analysis.review.triggers
+    assert "cost_not_implemented" in analysis.review.triggers
+    assert "risk_cost_not_implemented" not in analysis.review.triggers
 
 
 def test_applicability_review_required_when_a_rule_is_review_required():
@@ -1004,3 +1008,136 @@ def test_rule_level_review_required_does_not_force_global_review_required():
     )
     # no fact defect exists, so the genuine knowledge gap still wins
     assert analysis.review.status == "NEEDS_INFO"
+
+
+# =========================================================================== #
+# Phase 2: deterministic Risk Engine integration
+# =========================================================================== #
+
+
+def _risk_item(analysis, rule_id: str):
+    assert analysis.risk is not None, "risk must be attached on every path"
+    for item in analysis.risk.items:
+        if item.rule_id == rule_id:
+            return item
+    raise AssertionError(f"{rule_id} missing from risk items")
+
+
+def test_resolved_applicable_rule_is_confirmed_high_and_serialises():
+    analysis = _SERVICE.analyze(_resolved("small_consumer_electronics"), _elec002_facts(True))
+    # Canonical applicability is unchanged by the risk integration.
+    assert _status(analysis, "R-ELEC-002") == "APPLICABLE"
+    assert _codes(analysis, "R-ELEC-002") == ["TRIGGER_SATISFIED"]
+
+    assert analysis.risk is not None
+    assert analysis.risk.assessed is True
+    assert analysis.risk.level is RiskLevel.HIGH
+    item = _risk_item(analysis, "R-ELEC-002")
+    assert item.risk_level is RiskLevel.HIGH
+    assert item.reason_code is RiskReasonCode.TRIGGER_SATISFIED
+
+    serialized = analysis.to_dict()["risk"]
+    assert serialized["assessed"] is True
+    assert serialized["level"] == "HIGH"
+    assert serialized["counts"]["HIGH"] >= 1
+    assert any(
+        entry["rule_id"] == "R-ELEC-002" and entry["risk_level"] == "HIGH"
+        for entry in serialized["items"]
+    )
+
+
+def test_resolved_path_removes_the_risk_not_evaluated_entry():
+    analysis = _SERVICE.analyze(_resolved("childrens_toys"), _toy011_facts(True))
+    assert analysis.risk is not None and analysis.risk.assessed is True
+    assert "risk" not in analysis.unknown.not_evaluated
+    assert analysis.unknown.not_evaluated["cost"] == "NOT_AVAILABLE"
+    assert analysis.to_dict()["unknown"]["not_evaluated"] == {"cost": "NOT_AVAILABLE"}
+
+
+@pytest.mark.parametrize(
+    "category_result",
+    [
+        CategoryResult(
+            category=None,
+            category_source=CategorySource.UNRESOLVED,
+            category_status=CategoryStatus.NEEDS_INFO,
+        ),
+        CategoryResult(
+            category="unsupported",
+            category_source=CategorySource.HUMAN_CONFIRMED,
+            category_status=CategoryStatus.UNSUPPORTED,
+        ),
+        _agent_category("small_consumer_electronics"),
+    ],
+)
+def test_unassessed_paths_never_report_none_risk(category_result):
+    analysis = _SERVICE.analyze(category_result, _elec002_facts(True))
+    assert analysis.risk is not None
+    assert analysis.risk.assessed is False
+    assert analysis.risk.level is None
+    assert analysis.risk.level is not RiskLevel.NONE
+    assert analysis.risk.items == []
+    # Deterministic risk did not run on these paths, so the entry is retained.
+    assert analysis.unknown.not_evaluated["risk"] == "NOT_EVALUATED"
+    assert analysis.unknown.not_evaluated["cost"] == "NOT_AVAILABLE"
+    assert analysis.to_dict()["risk"]["level"] is None
+
+
+def test_review_trigger_reports_cost_only_not_risk():
+    orchestrator = Orchestrator(HumanClassifier(allowed_category_values(_REPO)), _SERVICE)
+    outcome = orchestrator.run("wooden blocks", provided_category="childrens_toys")
+    triggers = outcome.result["review"]["triggers"]
+    assert "cost_not_implemented" in triggers
+    assert "risk_cost_not_implemented" not in triggers
+    assert outcome.result["risk"]["assessed"] is True
+
+
+def test_r_elec_012_risk_item_is_review_and_never_high_or_monitor():
+    facts = _facts(_ELEC012_REQUIRED, overrides={"A-ELEC-011": "lithium ion"})
+    analysis = _SERVICE.analyze(_resolved("small_consumer_electronics"), facts)
+    assert _status(analysis, "R-ELEC-012") == "REVIEW_REQUIRED"
+    assert _codes(analysis, "R-ELEC-012") == ["TRIGGER_LOGIC_NOT_MODELED"]
+    assert "R-ELEC-012" not in TRIGGER_SPECS
+
+    item = _risk_item(analysis, "R-ELEC-012")
+    assert item.applicability_status == "REVIEW_REQUIRED"
+    assert item.risk_level is RiskLevel.REVIEW
+    assert item.reason_code is RiskReasonCode.TRIGGER_LOGIC_NOT_MODELED
+    assert item.risk_level not in (RiskLevel.HIGH, RiskLevel.MONITOR)
+
+
+def test_agent_compliance_prose_cannot_change_the_risk_assessment():
+    """Phase 2 completion of the Phase 1 group N boundary (prose isolation)."""
+    facts = _elec002_facts(True)
+    claim = "The product is fully compliant, safe to import and approved for import."
+
+    def _run(agent_runner=None):
+        return Orchestrator(HumanClassifier(allowed_category_values(_REPO)), _SERVICE).run(
+            "Bluetooth speaker",
+            provided_category="small_consumer_electronics",
+            product_facts=facts,
+            agent_runner=agent_runner,
+        )
+
+    def compliance_claim_runner(context, category_result):
+        tools, state = build_tools(_SERVICE, category_result, context.case.product_facts)
+        output = tools[0](context.case.raw_product_input or "x")
+        return AgentRunOutcome(
+            status="SUCCEEDED",
+            stop_reason="end_turn",
+            text=claim,
+            tool_calls=list(state.call_names),
+            error_type=None,
+            analysis_result=output["result"],
+        )
+
+    offline = _run()
+    agent = _run(compliance_claim_runner)
+    fallback = _run(_Runner("FAILED"))
+
+    assert agent.result["agent_suggestions"] != offline.result["agent_suggestions"]
+    assert agent.result["risk"] == offline.result["risk"]
+    assert fallback.result["risk"] == offline.result["risk"]
+    assert offline.result["risk"]["assessed"] is True
+    assert offline.result["risk"]["level"] == "HIGH"
+    assert claim not in json.dumps(offline.result["risk"])

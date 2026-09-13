@@ -3,8 +3,9 @@
 Responsibility: repository query, evidence aggregation, canonical result
 assembly, review trigger generation.
 
-It does NOT classify products, approve compliance, calculate risk, or
-calculate cost. Its output always separates three kinds of content:
+It does NOT classify products, approve compliance, or calculate cost; the
+compliance risk assessment is delegated to the deterministic Risk Engine and
+attached to the result. Its output always separates three kinds of content:
 ``verified`` (from the repository), ``agent_suggestions`` (candidate content
 requiring human review), and ``unknown`` (missing / not-evaluated).
 """
@@ -25,6 +26,7 @@ from src.services.applicability import (
     ApplicabilityStatus,
 )
 from src.services.classification import CategoryResult, CategorySource, CategoryStatus
+from src.services.risk import RiskAssessment, RiskEngine, unassessed_assessment
 from src.state import ProductFact
 
 # Deciding reason codes that represent a canonical INPUT DEFECT rather than a
@@ -36,6 +38,18 @@ _FACT_DEFECT_REASON_CODES: frozenset[ApplicabilityReasonCode] = frozenset(
         ApplicabilityReasonCode.INVALID_FACT_VALUE,
     }
 )
+
+# ``unknown.not_evaluated`` names the components that were NOT evaluated. Risk is
+# evaluated on a canonically confirmed (RESOLVED) path, so its entry is removed
+# there rather than replaced by another sentinel; every remaining entry is
+# preserved. Both dicts are constant templates and are always copied on use.
+_NOT_EVALUATED_DEFAULT: dict[str, str] = {
+    "risk": "NOT_EVALUATED",
+    "cost": "NOT_AVAILABLE",
+}
+_NOT_EVALUATED_WITHOUT_RISK: dict[str, str] = {
+    key: value for key, value in _NOT_EVALUATED_DEFAULT.items() if key != "risk"
+}
 
 
 class ComplianceFinding(BaseModel):
@@ -85,13 +99,12 @@ class VerifiedFacts(BaseModel):
 
 class UnknownInfo(BaseModel):
     missing_information: list[MissingInformation] = Field(default_factory=list)
-    # Applicability is canonical and lives in AnalysisResult.applicability; only
-    # the risk and cost engines are still unimplemented.
+    # Applicability and risk are canonical and live in AnalysisResult; only the
+    # cost engine is still unimplemented. ``not_evaluated`` names the components
+    # that were NOT evaluated, so the risk entry is dropped on a path where the
+    # deterministic Risk Engine actually ran (see _NOT_EVALUATED_WITHOUT_RISK).
     not_evaluated: dict[str, str] = Field(
-        default_factory=lambda: {
-            "risk": "NOT_EVALUATED",
-            "cost": "NOT_AVAILABLE",
-        }
+        default_factory=lambda: dict(_NOT_EVALUATED_DEFAULT)
     )
 
 
@@ -115,6 +128,10 @@ class AnalysisResult(BaseModel):
     # category is not yet confirmed" — it never means NOT_APPLICABLE or "no
     # requirements".
     applicability: ApplicabilityResult | None = None
+    # Canonical deterministic risk assessment, produced only when applicability
+    # was actually evaluated. ``assessed=False`` with ``level=None`` means the
+    # product could not be assessed — it never means "no risk" (RiskLevel.NONE).
+    risk: RiskAssessment | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return self.model_dump(mode="json")
@@ -127,6 +144,8 @@ class AnalysisService:
         self._repository = repository
         # Exactly one engine per service; never re-instantiated per rule.
         self._applicability_engine = ApplicabilityEngine(repository)
+        # Read-only deterministic risk engine over the same verified repository.
+        self._risk_engine = RiskEngine(repository)
 
     def analyze(
         self,
@@ -147,6 +166,9 @@ class AnalysisService:
                     triggers=["category_unresolved"],
                     reviewer_actions=["provide --category <category>"],
                 ),
+                # Not assessed: the category is not confirmed, so no rules were
+                # evaluated. ``not_evaluated`` keeps "risk": "NOT_EVALUATED".
+                risk=unassessed_assessment("unresolved"),
             )
         if status == CategoryStatus.UNSUPPORTED:
             return AnalysisResult(
@@ -157,6 +179,8 @@ class AnalysisService:
                     triggers=["unsupported_category"],
                     reviewer_actions=["stop: no verified compliance data for this category"],
                 ),
+                # Not assessed: there is no verified data for this category.
+                risk=unassessed_assessment("unsupported"),
             )
 
         rules = self._rules_for(category_result.category)
@@ -173,6 +197,17 @@ class AnalysisService:
         missing = (
             list(applicability.missing_attribute_ids) if applicability is not None else []
         )
+
+        # Deterministic risk assessment runs on exactly the path where canonical
+        # applicability was actually evaluated, and consumes the same deduplicated
+        # rule list. Every other path gets the approved unassessed contract
+        # (assessed=False, level=None) and never RiskLevel.NONE.
+        if applicability is not None:
+            risk = self._risk_engine.assess(rules, applicability)
+            not_evaluated = dict(_NOT_EVALUATED_WITHOUT_RISK)
+        else:
+            risk = unassessed_assessment("unresolved")
+            not_evaluated = dict(_NOT_EVALUATED_DEFAULT)
 
         triggers, actions = self._review(category_result, rules, missing, applicability)
         review_status = self._review_status(category_result, applicability)
@@ -193,10 +228,12 @@ class AnalysisService:
                         attribute_name=self._attribute_name(attribute_id),
                     )
                     for attribute_id in missing
-                ]
+                ],
+                not_evaluated=not_evaluated,
             ),
             review=Review(status=review_status, triggers=triggers, reviewer_actions=actions),
             applicability=applicability,
+            risk=risk,
         )
 
     def evidence_for(self, rule_id: str) -> dict[str, Any]:
@@ -327,8 +364,8 @@ class AnalysisService:
             triggers.append("insufficient_evidence")
         if any(rule.rule_status != RuleStatus.EFFECTIVE for rule in rules):
             triggers.append("rule_not_effective")
-        # Applicability is implemented and canonical; risk and cost are not.
-        triggers.append("risk_cost_not_implemented")
+        # Applicability and risk are implemented and canonical; cost is not.
+        triggers.append("cost_not_implemented")
         # Only a canonical, evaluated applicability result may raise this. A
         # ``None`` applicability (unconfirmed category) is already represented
         # by category_review_required and must not be reported as this.
@@ -379,7 +416,7 @@ class AnalysisService:
             ):
                 return "NEEDS_INFO"
 
-        # Risk and cost engines are not implemented, so a resolved category
+        # The cost engine is still not implemented, so a resolved category
         # without a genuine information gap still requires human review.
         return "REVIEW_REQUIRED"
 
