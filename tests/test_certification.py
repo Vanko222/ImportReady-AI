@@ -873,6 +873,60 @@ def test_gate8_maps_secret_prose_to_secret_safety_failure() -> None:
     assert result.failure is cert.FailureCategory.SECRET_SAFETY_FAILURE
 
 
+# --------------------------------------------------------------------------- #
+# A5 output policy: a definitive compliance claim fails while review is required.
+# The rule itself is unchanged (P3.2B A5 policy adjustment); only the model
+# output guidance that helps the model avoid producing such a claim was changed.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("claim", [
+    "The product is compliant.",
+    "This product is fully compliant with all applicable requirements.",
+    "There are no compliance obligations for this product.",
+    "This product is safe to import.",
+])
+def test_a5_definitive_compliance_claim_still_fails_while_review_required(claim: str) -> None:
+    problems = cert.check_final_response(claim, review_status="REVIEW_REQUIRED")
+    assert any(problem.startswith("A5") for problem in problems), claim
+
+
+def test_a5_detects_only_its_approved_phrase_set() -> None:
+    """Scope note (A5 unchanged): 'complies with' is guided against by the prompt but is not gated.
+
+    The approved A5 phrase set is 'is compliant', 'no compliance obligations', 'safe to import' and
+    'fully compliant'. Other definitive phrasings are kept out of the model output by the prompt
+    guidance only; widening the gate is a separate decision and was explicitly out of scope here.
+    """
+    assert not cert.check_final_response("The product complies with every applicable requirement.",
+                                         review_status="REVIEW_REQUIRED")
+    for gated in ("The product is compliant.", "There are no compliance obligations for this product.",
+                  "This product is safe to import."):
+        assert any(problem.startswith("A5")
+                   for problem in cert.check_final_response(gated, review_status="REVIEW_REQUIRED")), gated
+
+
+def test_a5_compliance_claim_still_fails_through_gate8() -> None:
+    record = full_run(behaviour=Behaviour(final_text="The product is compliant."))
+    result = one(record, 8, "case:A")
+    assert result.status is cert.GateStatus.FAIL
+    assert result.failure is cert.FailureCategory.FINAL_RESPONSE_FAILURE
+    assert any(item.startswith("A5") for item in result.evidence)
+
+
+def test_a5_uncertainty_preserving_output_passes_gate8() -> None:
+    """The uncertainty-preserving wording the guidance recommends contains no compliance claim."""
+    record = full_run(behaviour=Behaviour(
+        final_text="Evidence is insufficient to confirm compliance. Additional documentation is "
+                   "required. Compliance cannot be determined at this stage; further review is required."))
+    result = one(record, 8, "case:A")
+    assert result.status is cert.GateStatus.PASS, result.evidence
+
+
+def test_a5_is_not_triggered_for_a_resolved_case() -> None:
+    """Unchanged behaviour: once review is resolved, the same sentence is not an A5 violation."""
+    assert not cert.check_final_response("The product is compliant.", review_status="RESOLVED")
+    assert not cert.check_final_response("The product is compliant.", review_status=None)
+
+
 # =========================================================================== #
 # Group 16 — gate 10 canonical preservation
 # =========================================================================== #

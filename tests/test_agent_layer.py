@@ -1178,3 +1178,36 @@ def test_prompt_lifecycle_rules_preserved() -> None:
 def test_prompt_separation_of_facts_preserved() -> None:
     assert "never be promoted into the verified facts" in SYSTEM_PROMPT
     assert "agent_generated / REVIEW_REQUIRED" in SYSTEM_PROMPT
+
+
+# --------------------------------------------------------------------------- #
+# 30. REVIEW_REQUIRED output guidance (A5 policy adjustment: guidance only)
+# --------------------------------------------------------------------------- #
+def test_prompt_guides_uncertainty_when_review_is_not_resolved() -> None:
+    assert "Whenever the canonical review status is not RESOLVED" in SYSTEM_PROMPT
+    assert "must be provided before it can be assessed" in SYSTEM_PROMPT
+    assert "further human review " in SYSTEM_PROMPT
+    assert "not even negated, softened, or presented as a quotation" in SYSTEM_PROMPT
+
+
+def test_a5_guidance_is_not_itself_a_compliance_claim() -> None:
+    """The guidance must not hand the model a gate-flagged phrase to reproduce."""
+    from src.certification import certification as cert
+
+    start = SYSTEM_PROMPT.index("Whenever the canonical review status is not RESOLVED")
+    guidance = SYSTEM_PROMPT[start:SYSTEM_PROMPT.index("Unknown product attributes")]
+    assert cert.check_final_response(guidance, review_status="REVIEW_REQUIRED") == []
+    for flagged in ("is compliant", "no compliance obligations", "safe to import", "fully compliant"):
+        assert flagged not in guidance.lower(), flagged
+
+
+def test_uncertainty_preserving_templates_pass_the_a5_check() -> None:
+    from src.certification import certification as cert
+
+    for template in ("Evidence is insufficient to confirm compliance.",
+                     "Additional documentation is required.",
+                     "Compliance cannot be determined at this stage.",
+                     "Further review is required."):
+        assert cert.check_final_response(template, review_status="REVIEW_REQUIRED") == [], template
+    problems = cert.check_final_response("The product is compliant.", review_status="REVIEW_REQUIRED")
+    assert any(problem.startswith("A5") for problem in problems)
