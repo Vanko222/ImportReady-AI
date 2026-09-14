@@ -28,9 +28,9 @@ from src.certification.live_target import (
 )
 from src.services.classification import CategoryResult, CategorySource, CategoryStatus
 
-DEEPSEEK = ("deepseek", "deepseek-flash")
-ACK = "CERTIFY deepseek/deepseek-flash"
-DEEPSEEK_ENV = {"MODEL_PROVIDER": "deepseek", "MODEL_ID": "deepseek-flash"}
+DEEPSEEK = ("deepseek", "deepseek-v4-flash")
+ACK = "CERTIFY deepseek/deepseek-v4-flash"
+DEEPSEEK_ENV = {"MODEL_PROVIDER": "deepseek", "MODEL_ID": "deepseek-v4-flash"}
 # The category the approved CaseSpec fixtures expect for A and B, and the safe Case C outcome.
 CERTIFICATION_CATEGORY = "small_consumer_electronics"
 UNSUPPORTED_CATEGORY = "unsupported"
@@ -118,7 +118,7 @@ def test_acknowledgement_accepts_the_exact_combination() -> None:
 
 
 def test_acknowledgement_literal_is_derived_from_the_combination() -> None:
-    assert live_acknowledgement_literal(*DEEPSEEK) == f"{LIVE_ACK_PREFIX} deepseek/deepseek-flash"
+    assert live_acknowledgement_literal(*DEEPSEEK) == f"{LIVE_ACK_PREFIX} deepseek/deepseek-v4-flash"
     assert live_acknowledgement_literal(" bedrock ", "some-model") == "CERTIFY bedrock/some-model"
 
 
@@ -132,10 +132,10 @@ def test_acknowledgement_tolerates_surrounding_whitespace_only() -> None:
 # =========================================================================== #
 @pytest.mark.parametrize("wrong", [
     "CERTIFY deepseek/deepseek-chat",         # wrong model
-    "CERTIFY bedrock/deepseek-flash",         # wrong provider
-    "CERTIFY deepseek/deepseek-flash extra",  # extra token
+    "CERTIFY bedrock/deepseek-v4-flash",         # wrong provider
+    "CERTIFY deepseek/deepseek-v4-flash extra",  # extra token
     "CERTIFY deepseek/",                      # missing model
-    "CERTIFY /deepseek-flash",                # missing provider
+    "CERTIFY /deepseek-v4-flash",                # missing provider
     "DEEPSEEK_OK",                            # the Step 2 probe token is not an acknowledgement
 ])
 def test_wrong_acknowledgement_is_rejected(wrong: str) -> None:
@@ -154,9 +154,9 @@ def test_missing_or_blank_acknowledgement_is_not_accepted(blank) -> None:
 
 
 @pytest.mark.parametrize("mismatch", [
-    "certify deepseek/deepseek-flash",   # keyword case
+    "certify deepseek/deepseek-v4-flash",   # keyword case
     "Certify Deepseek/Deepseek-Flash",   # whole-string case
-    "CERTIFY DEEPSEEK/deepseek-flash",   # provider case
+    "CERTIFY DEEPSEEK/deepseek-v4-flash",   # provider case
     "CERTIFY deepseek/DEEPSEEK-FLASH",   # model case
 ])
 def test_acknowledgement_case_and_token_mismatch_is_rejected(mismatch: str) -> None:
@@ -201,9 +201,9 @@ def test_plan_contains_every_required_field() -> None:
         ui_exposed=False,
         certification_ref=None,
     )
-    for expected in ("deepseek", "deepseek-flash", "EXPERIMENTAL", "ui_exposed=False",
+    for expected in ("deepseek", "deepseek-v4-flash", "EXPERIMENTAL", "ui_exposed=False",
                      "certification_ref=none", "endpoint strategy", "cases: A, B, C",
-                     "request ceiling: 24 total, 8 per case", "no retries",
+                     "request ceiling: 33 total, 8 per case", "no retries",
                      "wall clock: 600s per run, 120s per case", "6 agent turns",
                      "evidence: run.txt", "outside the repository", "SHA-256",
                      "registry effect: none", "never promotes", "never exposes",
@@ -225,11 +225,11 @@ def test_plan_reflects_explicit_limits_and_empty_cases() -> None:
 def test_plan_renders_with_defaults_only() -> None:
     """A bare call needs no registry status and no evidence path to stay informative."""
     plan = render_live_certification_plan(*DEEPSEEK).text
-    assert "live certification plan — deepseek/deepseek-flash" in plan
+    assert "live certification plan — deepseek/deepseek-v4-flash" in plan
     assert "status: UNKNOWN" in plan
-    assert "cases: A, B, C" in plan
+    assert "cases: A, B, C, D" in plan
     assert "default directory outside the repository" in plan
-    assert "request ceiling: 24 total, 8 per case" in plan
+    assert "request ceiling: 33 total, 8 per case" in plan
     assert "acknowledgement:" not in plan          # nothing acknowledged yet
 
 
@@ -279,13 +279,26 @@ def test_phase1_adds_no_network_surface_and_keeps_the_core_frozen() -> None:
     assert "os.environ" not in source
     assert "getenv" not in source
     assert cert.ALL_GATES == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
-    assert cert.CASE_IDS == ("A", "B", "C")
+    assert cert.CASE_IDS == ("A", "B", "C", "D")
 
 
 # =========================================================================== #
 # Phase 2 — guarded CLI wiring (`src/certification/__main__.py`)
 # =========================================================================== #
-TARGET = ("--provider", "deepseek", "--model", "deepseek-flash")
+TARGET = ("--provider", "deepseek", "--model", "deepseek-v4-flash")
+
+
+@pytest.fixture(autouse=True)
+def _bind_cli_target_to_the_process_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Supply the CLI's non-secret environment bindings so the suite is self-contained.
+
+    The guarded `--execute` path binds its live preflight to ``MODEL_PROVIDER``/``MODEL_ID``
+    in the process environment. The suite sets those two names itself (never the credential,
+    which these tests never set, read or require) so the result does not depend on the
+    ambient shell.
+    """
+    monkeypatch.setenv("MODEL_PROVIDER", DEEPSEEK[0])
+    monkeypatch.setenv("MODEL_ID", DEEPSEEK[1])
 
 
 def live_cli(*extra: str) -> int:
@@ -305,7 +318,7 @@ def test_live_without_acknowledgement_fails_closed(monkeypatch, capsys) -> None:
 def test_live_with_a_wrong_acknowledgement_is_rejected(monkeypatch, capsys) -> None:
     monkeypatch.setattr(model_factory, "build_model", _forbidden_build)
     for wrong in ("yes", "--force", "--yes", "CERTIFY deepseek/deepseek-chat",
-                  "certify deepseek/deepseek-flash", "CERTIFY deepseek"):
+                  "certify deepseek/deepseek-v4-flash", "CERTIFY deepseek"):
         # ``--ack=<value>`` so a value that looks like a flag is still passed through to the guard.
         assert live_cli(f"--ack={wrong}") == 2, wrong
     output = capsys.readouterr().out
@@ -319,9 +332,9 @@ def test_live_with_the_exact_acknowledgement_renders_the_plan_and_stops(monkeypa
     monkeypatch.setattr(model_factory, "build_model", _forbidden_build)
     assert live_cli("--ack", ACK) == 0
     output = capsys.readouterr().out
-    for expected in ("live certification plan", "deepseek", "deepseek-flash", "EXPERIMENTAL",
-                     "ui_exposed=False", "certification_ref=none", "cases: A, B, C",
-                     "request ceiling: 24 total", "wall clock: 600s", "evidence:",
+    for expected in ("live certification plan", "deepseek", "deepseek-v4-flash", "VERIFIED",
+                     "ui_exposed=True", "certification_ref=none", "cases: A, B, C, D",
+                     "request ceiling: 33 total", "wall clock: 600s", "evidence:",
                      "outside the repository", "SHA-256", "registry effect: none",
                      "never promotes", "never exposes", f"acknowledgement: {ACK}",
                      "no provider request was made"):
@@ -346,7 +359,8 @@ def test_live_refuses_an_unregistered_or_unsupported_combination(capsys) -> None
 
 
 def test_live_still_refuses_unknown_case_ids(capsys) -> None:
-    assert live_cli("--ack", ACK, "--cases", "A,D") == 2
+    # "E" is not a registered case id (D, the children's-toy fixture, is valid).
+    assert live_cli("--ack", ACK, "--cases", "A,E") == 2
     assert "unknown case ids" in capsys.readouterr().out
 
 
@@ -372,7 +386,7 @@ def test_offline_and_probe_cli_paths_are_unchanged(monkeypatch) -> None:
     monkeypatch.setattr(model_factory, "build_model", _forbidden_build)
     assert main(list(TARGET)) == 0                            # offline preview
     assert main([*TARGET, "--live"]) == 2                     # unacknowledged live refusal
-    assert main([*TARGET, "--cases", "A,D"]) == 2             # unknown case ids
+    assert main([*TARGET, "--cases", "A,E"]) == 2             # unknown case ids ("D" is valid now)
     for name in ("MODEL_PROVIDER", "MODEL_ID", "API_KEY"):
         monkeypatch.delenv(name, raising=False)
     assert main([*TARGET, "--live-probe"]) == 1               # Step 2 probe path intact (unconfigured → fails safely)
@@ -391,8 +405,8 @@ class _Record:
         return self._overall
 
     def render_markdown(self) -> str:
-        return ("# Certification run — deepseek + deepseek-flash\n\n## Target\n\n| Field | Value |\n"
-                "|---|---|\n| evidence artifact (filename) | deepseek__deepseek-flash.txt |\n"
+        return ("# Certification run — deepseek + deepseek-v4-flash\n\n## Target\n\n| Field | Value |\n"
+                "|---|---|\n| evidence artifact (filename) | deepseek__deepseek-v4-flash.txt |\n"
                 "| evidence SHA-256 | abc123 |\n| overall status | **FAILED** |\n")
 
 
@@ -470,13 +484,20 @@ def stub_offline_run(*, leak: bool = False, continuation_text: str | None = None
         # Two provider-side/human steps are supplied deterministically so the suite never blocks on a
         # terminal: the classification suggestion and the per-case confirmation. Everything else (real
         # gates, real tools, real orchestrator, real record and evidence writer) runs unchanged.
+        # The children's-toy fixture is classified as a toy; the out-of-scope fixture declines.
+        def _category_for(description: str) -> str:
+            text = str(description).lower()
+            if "pepper" in text:
+                return UNSUPPORTED_CATEGORY
+            if "building blocks" in text:
+                return "childrens_toys"
+            return CERTIFICATION_CATEGORY
+
         target.classify = lambda model, description, allowed: CategoryResult(
-            category=UNSUPPORTED_CATEGORY if "pepper" in str(description).lower() else CERTIFICATION_CATEGORY,
+            category=_category_for(description),
             category_source=CategorySource.AGENT_GENERATED,
             category_status=CategoryStatus.REVIEW_REQUIRED)
-        target.confirm = lambda case, suggestion, allowed: (
-            "confirm", UNSUPPORTED_CATEGORY if "pepper" in str(case.description).lower()
-            else CERTIFICATION_CATEGORY)
+        target.confirm = lambda case, suggestion, allowed: ("confirm", _category_for(case.description))
         return target
 
     return build_target, models
@@ -519,9 +540,9 @@ def test_execute_calls_the_bridge_once_with_the_exact_target(monkeypatch, capsys
     assert live_cli("--execute", "--ack", ACK, "--cases", "A,B") == 0
     assert len(calls) == 1
     provider_id, model_id, kwargs = calls[0]
-    assert (provider_id, model_id) == ("deepseek", "deepseek-flash")
+    assert (provider_id, model_id) == ("deepseek", "deepseek-v4-flash")
     assert kwargs["cases"] == ("A", "B")
-    assert Path(kwargs["evidence_out"]).name == "deepseek__deepseek-flash.txt"
+    assert Path(kwargs["evidence_out"]).name == "deepseek__deepseek-v4-flash.txt"
     assert kwargs["write_evidence_file"] is True
     output = capsys.readouterr().out
     assert "overall status: PASS" in output
@@ -661,7 +682,7 @@ def test_execute_end_to_end_with_a_stub_target_and_the_real_runner(monkeypatch, 
     block_http(monkeypatch)
     real_bridge = lt.run_guarded_live_certification
     build_target, models = stub_offline_run()
-    evidence = tmp_path / "evidence" / "deepseek__deepseek-flash.txt"
+    evidence = tmp_path / "evidence" / "deepseek__deepseek-v4-flash.txt"
 
     def stub_bridge(provider_id, model_id, **kwargs):
         return real_bridge(provider_id, model_id, build_target=build_target, **kwargs)

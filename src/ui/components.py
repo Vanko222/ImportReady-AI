@@ -20,15 +20,15 @@ Visual rules:
 from __future__ import annotations
 
 import html
-from typing import Any, Mapping, MutableMapping
+from typing import Any, Mapping, MutableMapping, Sequence
 
 import streamlit as st
 
 from src.models import ProductAttribute
-from src.services.actions import ActionPlan, ActionType
 from src.services.analysis import AnalysisResult
 from src.services.classification import CategoryResult
-from src.ui import pipeline
+from src.ui import intake as intake_flow
+from src.ui import narrative, pipeline
 from src.ui import state as ui_state
 from src.ui.i18n import LANGUAGE_LABELS, t
 from src.ui.presenters import (
@@ -41,6 +41,7 @@ from src.ui.presenters import (
     requirement_cards,
     requirement_context_label,
     risk_view,
+    rule_result_rows,
     summary,
     technical_view,
 )
@@ -398,20 +399,6 @@ def render_category_section(
 # --------------------------------------------------------------------------- #
 # Section 3: missing information (progressive disclosure)
 # --------------------------------------------------------------------------- #
-def _canonical_question(plan: ActionPlan | None, attribute_id: str) -> str | None:
-    """Reuse the canonical MISSING_INFORMATION question text when available."""
-    if plan is None:
-        return None
-    for item in plan.items:
-        if (
-            item.action_type is ActionType.MISSING_INFORMATION
-            and item.attribute_id == attribute_id
-            and item.canonical_text
-        ):
-            return item.canonical_text
-    return None
-
-
 def _missing_info_input(
     attribute: ProductAttribute,
     question: str,
@@ -470,6 +457,21 @@ def _missing_info_input(
         items = [line.strip() for line in typed.splitlines() if line.strip()]
         return items or None
 
+    if attribute.data_type == "multi_select":
+        # One explicit customer value per line. Some canonical multi_select attributes
+        # have a closed vocabulary and some are deliberately vocabulary-free, so no
+        # allowed value is ever invented, pre-selected or corrected here: the
+        # Applicability Engine stays the single validation authority.
+        typed = st.text_area(
+            label,
+            key=key,
+            height=68,
+            help=help_text,
+            placeholder=t("value_free_list", lang),
+        )
+        items = [line.strip() for line in typed.splitlines() if line.strip()]
+        return items or None
+
     if attribute.data_type == "date":
         typed = st.text_input(label, key=key, help=help_text, placeholder="YYYY-MM-DD")
         typed = typed.strip()
@@ -482,19 +484,9 @@ def _missing_info_input(
     return None
 
 
-def _render_missing_item(
-    repository: Any,
-    analysis: AnalysisResult,
-    item: Any,
-    lang: str,
-) -> Any:
-    attribute = repository.get_attribute(item.attribute_id)
-    if attribute is None:
-        return None
-    question = _canonical_question(analysis.actions, item.attribute_id) or (
-        attribute.attribute_name
-    )
-    return _missing_info_input(attribute, question, lang, repository)
+def _render_missing_row(row: Any, lang: str, repository: Any) -> Any:
+    """Render exactly one resolved row: one attribute, one widget, its own question."""
+    return _missing_info_input(row.attribute, row.question, lang, repository)
 
 
 def render_missing_information(
@@ -513,7 +505,9 @@ def render_missing_information(
     * **Additional information (N)** is a collapsed expander holding every other
       canonical missing attribute, still answerable.
 
-    Answers from both groups follow the same existing ``FactOrigin.USER`` path.
+    One canonical ``attribute_id`` produces exactly one widget (however many rules
+    require it), each labelled with that attribute's own localized question. Answers
+    from both groups follow the same existing ``FactOrigin.USER`` path.
     """
     if analysis is None:
         return {}, False
@@ -542,26 +536,24 @@ def render_missing_information(
     if not missing:
         return answers, False
 
-    key_items, additional_items = pipeline.missing_information_split(repository, analysis)
+    rows = pipeline.missing_information_rows(repository, analysis, lang)
+    key_rows = [row for row in rows if row.group == "key"]
+    additional_rows = [row for row in rows if row.group == "additional"]
 
-    if key_items:
+    if key_rows:
         subsection(t("key_information", lang))
-        for item in key_items:
-            answers[item.attribute_id] = _render_missing_item(
-                repository, analysis, item, lang
-            )
+        for row in key_rows:
+            answers[row.attribute_id] = _render_missing_row(row, lang, repository)
 
-    if additional_items:
+    if additional_rows:
         # Expanded automatically only when there is no key group, so nothing is
         # hidden from the customer on categories without trigger-based facts.
         with st.expander(
-            t("additional_information", lang, count=len(additional_items)),
-            expanded=not key_items,
+            t("additional_information", lang, count=len(additional_rows)),
+            expanded=not key_rows,
         ):
-            for item in additional_items:
-                answers[item.attribute_id] = _render_missing_item(
-                    repository, analysis, item, lang
-                )
+            for row in additional_rows:
+                answers[row.attribute_id] = _render_missing_row(row, lang, repository)
 
     updated = st.button(
         t("update_analysis", lang), key="ir_update_analysis", type="primary"
@@ -833,6 +825,16 @@ def _render_technical(
         st.write(technical_view(analysis, meta, lang))
 
 
+def _render_rule_results(analysis: AnalysisResult, lang: str) -> None:
+    """Every canonical per-rule result, verbatim (technical traceability)."""
+    rows = rule_result_rows(analysis, lang)
+    subsection(t("technical_rule_results", lang))
+    if not rows:
+        note("info", t("technical_rule_results_none", lang))
+        return
+    st.dataframe(rows, width="stretch")
+
+
 # --------------------------------------------------------------------------- #
 # What-if
 # --------------------------------------------------------------------------- #
@@ -971,3 +973,300 @@ def render_what_if_result(result: Any, name_lookup: Any, lang: str) -> None:
         with st.expander(t("what_if_notes", lang)):
             for text in view.notes:
                 st.caption(text)
+
+
+# --------------------------------------------------------------------------- #
+# Consumer UX v2 - conversational intake, narrative report, advanced views
+# --------------------------------------------------------------------------- #
+def render_intake_section(session_state: MutableMapping[str, Any], lang: str) -> bool:
+    """ONE primary natural-language intake box; returns True when Analyze was clicked."""
+    section(t("intake_section", lang))
+    st.caption(t("intake_helper", lang))
+    st.text_area(
+        t("product_description", lang),
+        key=ui_state.KEY_DESCRIPTION,
+        height=180,
+        placeholder=t("intake_placeholder", lang),
+    )
+    return st.button(
+        t("analyze_product", lang), key="ir_analyze", type="primary", width="stretch"
+    )
+
+
+def _intake_notes_block(session_state: MutableMapping[str, Any], lang: str) -> None:
+    notes = intake_flow.notes(session_state)
+    if not notes:
+        return
+    subsection(t("ai_understood_notes", lang))
+    for note in notes:
+        _html(f'<div class="ir-line">{esc(note)}</div>')
+    st.caption(t("ai_understood_notes_note", lang))
+
+
+def render_ai_understood(
+    session_state: MutableMapping[str, Any],
+    repository: Any,
+    lang: str,
+) -> tuple[str | None, str | None]:
+    """Compact "AI understood" review; return ``(category, action)``.
+
+    ``action`` is one of:
+
+    * ``"use_category"`` - the customer confirmed the selected category and wants the
+      details read for **that** category (the extraction vocabulary boundary);
+    * ``"confirm"`` - the visible bundle is bound to the selected category and the
+      customer confirmed it;
+    * ``"edit"`` - the customer wants to change the description.
+
+    Nothing becomes a canonical fact here: the caller performs the confirmation
+    through the existing USER boundary, which re-checks the category binding.
+    """
+    # The review appears only AFTER "Analyze Product" submitted this exact text: while
+    # the customer is merely typing there is no suggestion, no bundle and no selector.
+    if not intake_flow.intake_submitted(session_state):
+        return None, None
+    choices = pipeline.consumer_category_choices(repository)
+    if not choices:
+        return None, None
+
+    suggestion = _suggestion_result(session_state)
+    suggested_category = suggestion.category if suggestion is not None else None
+    suggestion_error = session_state.get(ui_state.KEY_SUGGESTION_ERROR)
+    intake_error = session_state.get(intake_flow.KEY_INTAKE_ERROR)
+
+    section(t("ai_understood_title", lang))
+
+    if suggested_category:
+        _html(
+            '<div class="ir-card">'
+            f'<div class="ir-card-title">{esc(t("ai_understood_suggested_category", lang))}</div>'
+            f'<div class="ir-line">{esc(category_label(suggested_category, lang))}</div>'
+            "</div>"
+        )
+    else:
+        note("info", t("no_suggestion", lang))
+
+    if suggestion_error == "sensitive_input" or intake_error == "sensitive_input":
+        note("error", t("intake_sensitive", lang))
+    elif suggestion_error or intake_error:
+        # Provider/classification/extraction failure: a calm explanation, never a
+        # fabricated suggestion and never the old questionnaire.
+        note("warning", t("intake_ai_unavailable", lang))
+
+    default_index = (
+        choices.index(suggested_category) if suggested_category in choices else 0
+    )
+    selected = st.selectbox(
+        t("category_choice", lang),
+        options=choices,
+        index=default_index,
+        format_func=lambda value: category_label(value, lang),
+        key=ui_state.KEY_INTAKE_CATEGORY_CONTROL,
+    )
+    # The bundle is only ever shown/confirmed for the category it was read with.
+    bound = intake_flow.bundle_matches_category(session_state, selected)
+
+    subsection(t("ai_understood_facts", lang))
+    views = intake_flow.candidate_views(session_state, repository, lang) if bound else ()
+    if views:
+        rows: list[str] = []
+        for view in views:
+            rows.append(
+                '<div class="ir-item">'
+                f'<div class="ir-line"><strong>{esc(view.question)}</strong> '
+                f"{chips(view.value_text, accent=True)}</div>"
+                f'<div class="ir-meta">{esc(t("ai_understood_you_said", lang))}: '
+                f'"{esc(view.supporting_text)}"</div>'
+                "</div>"
+            )
+        _html(f'<div class="ir-card">{"".join(rows)}</div>')
+    elif not bound:
+        st.caption(t("extraction_category_changed", lang))
+    else:
+        st.caption(t("ai_understood_none", lang))
+
+    if bound:
+        _intake_notes_block(session_state, lang)
+
+    # Only deterministic localized copy: raw model warning prose is never rendered.
+    skipped = intake_flow.warning_count(session_state) if bound else 0
+    if skipped:
+        st.caption(t("intake_warnings_skipped", lang))
+        st.caption(t("intake_warnings_count", lang, count=skipped))
+    st.caption(t("ai_understood_unknown_note", lang))
+
+    if bound:
+        st.caption(t("confirm_category_bundle_note", lang))
+        confirmed = st.button(
+            t("confirm_bundle", lang),
+            key="ir_confirm_bundle",
+            type="primary",
+            width="stretch",
+        )
+    else:
+        # First human boundary for a changed/unchosen category: read the details with
+        # the selected category's approved vocabulary, then require confirmation again.
+        st.caption(t("confirm_category_bundle_note", lang))
+        confirmed = st.button(
+            t("use_selected_category", lang),
+            key="ir_use_category",
+            type="primary",
+            width="stretch",
+        )
+    edited = st.button(t("edit_information", lang), key="ir_edit_information")
+    if edited:
+        return None, "edit"
+    if confirmed and selected:
+        return selected, "confirm" if bound else "use_category"
+    return None, None
+
+
+def render_customer_report(
+    repository: Any,
+    analysis: AnalysisResult | None,
+    lang: str,
+    category_status: str | None,
+    commercial_notes: Sequence[str] = (),
+) -> None:
+    """Default customer report: five short natural-language sections."""
+    section(t("report_section", lang))
+    report = narrative.build_report(
+        repository,
+        analysis,
+        lang,
+        category_status=category_status,
+        commercial_notes=commercial_notes,
+    )
+
+    subsection(t("report_overall", lang))
+    _html(f'<div class="ir-line">{esc(report.overall_assessment)}</div>')
+
+    scoped = category_status not in ("UNSUPPORTED",) and analysis is not None
+    if not scoped:
+        # Out-of-scope or not yet assessed: no fabricated sections, only the
+        # limitation statement and the disclaimer.
+        subsection(t("report_limitations", lang))
+        for line in report.limitations:
+            _html(f'<div class="ir-line">{esc(line)}</div>')
+        st.caption(report.disclaimer)
+        return
+
+    subsection(t("report_attention", lang))
+    if report.attention_areas:
+        _html(f'<div class="ir-line">{esc(report.attention_lead)}</div>')
+        for area in report.attention_areas:
+            _html(f'<div class="ir-line">• {esc(area)}</div>')
+    else:
+        _html(f'<div class="ir-line">{esc(report.attention_none)}</div>')
+
+    subsection(t("report_verify", lang))
+    if report.verification_items:
+        _html(f'<div class="ir-line">{esc(report.verification_lead)}</div>')
+        for item in report.verification_items:
+            _html(f'<div class="ir-line">• {esc(item.question)}</div>')
+        if report.verification_more:
+            st.caption(report.verification_more)
+    else:
+        _html(f'<div class="ir-line">{esc(report.verification_none)}</div>')
+
+    subsection(t("report_cost", lang))
+    for line in report.cost_outlook:
+        _html(f'<div class="ir-line">{esc(line)}</div>')
+    for note in report.commercial_notes:
+        _html(
+            f'<div class="ir-line">{esc(t("report_commercial_reported", lang, note=note.text))}'
+            "</div>"
+        )
+    if report.commercial_notice:
+        st.caption(report.commercial_notice)
+
+    subsection(t("report_next_step", lang))
+    _html(f'<div class="ir-line">{esc(report.recommended_next_step)}</div>')
+
+    subsection(t("report_limitations", lang))
+    for line in report.limitations:
+        _html(f'<div class="ir-line">{esc(line)}</div>')
+    st.caption(report.disclaimer)
+
+
+def render_scenario_section(
+    session_state: MutableMapping[str, Any],
+    repository: Any,
+    analysis: AnalysisResult | None,
+    category: str | None,
+    lang: str,
+    what_if_result: Any,
+) -> tuple[dict[str, Any], bool, bool]:
+    """Optional scenario analysis, collapsed by default, with a natural summary."""
+    if analysis is None or not category:
+        return {}, False, False
+
+    with st.expander(t("scenario_section", lang), expanded=False):
+        st.caption(t("scenario_lead", lang))
+        overrides, run, reset = render_what_if(
+            session_state, repository, analysis, category, lang
+        )
+        if what_if_result is not None:
+            from src.ui.presenters import what_if_view
+
+            view = what_if_view(
+                what_if_result,
+                lang,
+                lambda attribute_id: _attribute_name_for(repository, attribute_id),
+            )
+            summary = narrative.scenario_summary(repository, view.overrides, lang)
+            if summary:
+                subsection(t("report_overall", lang))
+                _html(
+                    f'<div class="ir-line">{esc(t("scenario_summary_lead", lang))}</div>'
+                )
+                for line in summary:
+                    _html(f'<div class="ir-line">• {esc(line)}</div>')
+            else:
+                note("info", t("scenario_summary_empty", lang))
+            render_what_if_result(
+                what_if_result,
+                lambda attribute_id: _attribute_name_for(repository, attribute_id),
+                lang,
+            )
+    return overrides, run, reset
+
+
+def _attribute_name_for(repository: Any, attribute_id: str) -> str | None:
+    attribute = repository.get_attribute(attribute_id)
+    return attribute.attribute_name if attribute is not None else None
+
+
+def render_technical_details(
+    session_state: MutableMapping[str, Any],
+    repository: Any,
+    analysis: AnalysisResult | None,
+    meta: Mapping[str, Any] | None,
+    lang: str,
+) -> tuple[dict[str, Any], bool]:
+    """Optional advanced view: every canonical identifier, status and source.
+
+    Nothing is removed from the product - the structured interface simply lives
+    behind one collapsed expander. Returns the missing-information answers and
+    whether the customer asked to re-run the analysis with them.
+    """
+    answers: dict[str, Any] = {}
+    updated = False
+    with st.expander(t("technical_details_label", lang), expanded=False):
+        st.caption(t("technical_collapsed_hint", lang))
+        if analysis is None:
+            note("info", t("results_placeholder", lang))
+            return answers, updated
+        review_status = (meta or {}).get("review_status")
+        _render_summary(analysis, review_status, lang)
+        _render_requirements(analysis, lang)
+        _render_rule_results(analysis, lang)
+        _render_risk(analysis, lang)
+        _render_actions(analysis, lang)
+        _render_cost(analysis, lang)
+        _render_evidence(analysis, lang)
+        _render_technical(analysis, meta, lang)
+        answers, updated = render_missing_information(
+            session_state, repository, analysis, lang
+        )
+    return answers, updated

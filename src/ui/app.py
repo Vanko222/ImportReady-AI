@@ -1,11 +1,21 @@
 """Consumer Web UI page (Streamlit).
 
-Flow: product description -> AI category suggestion -> human confirmation ->
-missing information -> canonical analysis -> results -> what-if -> evidence.
+Customer flow (Consumer UX v2):
+
+    one natural-language product box
+      -> AI category suggestion (candidate only)
+      -> "AI understood" review (suggested category + extracted candidates)
+      -> explicit customer confirmation
+      -> deterministic canonical analysis
+      -> concise natural-language customer report
+      -> optional scenario analysis (What-if, collapsed)
+      -> optional Technical details (every canonical id/status/source, collapsed)
 
 This page only orchestrates. Every compliance decision comes from the accepted
-deterministic engines (via :mod:`src.ui.pipeline`), and every rendered value comes
-from :mod:`src.ui.presenters`.
+deterministic engines (via :mod:`src.ui.pipeline`); the narrative report is composed
+deterministically by :mod:`src.ui.narrative`; the customer's text and the AI-extracted
+candidates are handled by :mod:`src.ui.intake` and never become canonical facts before
+the customer confirms them.
 
 Rendering rule for consistency: any action that changes canonical state stores it
 in session state, queues a short message and immediately calls ``st.rerun()``, so
@@ -21,9 +31,9 @@ import streamlit as st
 from src.services.analysis import AnalysisResult
 from src.services.what_if import WhatIfResult
 from src.ui import components as ui
+from src.ui import intake as intake_flow
 from src.ui import pipeline
 from src.ui import state as ui_state
-from src.ui.i18n import t
 from src.ui.resources import get_analysis_service, get_repository
 
 PAGE_TITLE = "ImportReady AI"
@@ -120,17 +130,33 @@ def _run_canonical_analysis(
         ui_state.set_flash(session_state, outcome.error_code, "warning")
 
 
-def _handle_analyze(
+def _category_status(session_state: MutableMapping[str, Any]) -> str | None:
+    """Canonical category status of the confirmed category (never inferred)."""
+    category = session_state.get(ui_state.KEY_CONFIRMED_CATEGORY)
+    if not category:
+        return None
+    if category == "unsupported":
+        return "UNSUPPORTED"
+    if category == "uncertain":
+        return "NEEDS_INFO"
+    return "RESOLVED"
+
+
+def _handle_intake_analyze(
     session_state: MutableMapping[str, Any],
     repository: Any,
 ) -> None:
-    """Start a new product: reset state, then attempt an AI category suggestion."""
+    """Start a new product: reset derived state, then suggest + extract."""
     description = (session_state.get(ui_state.KEY_DESCRIPTION) or "").strip()
     if not description:
-        ui_state.set_flash(session_state, "describe_required", "warning")
+        ui_state.set_flash(session_state, "intake_no_text", "warning")
         return
 
-    # A new product invalidates the previous confirmation, analysis and scenario.
+    # A new Analyze action starts a new workflow: drop the previous product's category
+    # widget state so the selector defaults to THIS suggestion (never auto-confirmed).
+    ui_state.reset_category_control(session_state)
+
+    # A new intake invalidates the previous confirmation, analysis and scenario.
     session_state[ui_state.KEY_CONFIRMED_CATEGORY] = None
     session_state[ui_state.KEY_ANALYSIS] = None
     session_state[ui_state.KEY_ANALYSIS_META] = None
@@ -139,17 +165,81 @@ def _handle_analyze(
     session_state[ui_state.KEY_FACT_ANSWERS] = {}
     session_state[ui_state.KEY_SUGGESTION] = None
     session_state[ui_state.KEY_SUGGESTION_ERROR] = None
+    intake_flow.clear_intake_extraction(session_state)
+
+    # Sensitive-input guard runs before any model is constructed or called.
+    if pipeline.contains_sensitive_input(description):
+        session_state[ui_state.KEY_SUGGESTION_ERROR] = "sensitive_input"
+        session_state[intake_flow.KEY_INTAKE_ERROR] = "sensitive_input"
+        session_state[intake_flow.KEY_INTAKE_TEXT_USED] = description
+        ui_state.set_flash(session_state, "intake_sensitive", "error")
+        return
 
     model, error_code = _resolve_model(session_state)
     outcome = pipeline.suggest_category(repository, description, model)
     if outcome.suggestion is not None:
         session_state[ui_state.KEY_SUGGESTION] = outcome.suggestion.model_dump(mode="json")
-    if outcome.error_code == "sensitive_input":
-        session_state[ui_state.KEY_SUGGESTION_ERROR] = "sensitive_input"
-        ui_state.set_flash(session_state, "sensitive_input", "error")
-    elif outcome.error_code:
+    if outcome.error_code:
         session_state[ui_state.KEY_SUGGESTION_ERROR] = outcome.error_code
-    elif error_code:
+    if error_code:
+        ui_state.set_flash(session_state, error_code, "error")
+
+    # Extraction runs for the SUGGESTED category only as a convenience: the customer
+    # must still confirm the category, and any later category change re-runs the
+    # extraction with the human-selected vocabulary (never the suggestion's).
+    suggested = outcome.suggestion.category if outcome.suggestion is not None else None
+    intake_flow.run_extraction(
+        session_state, repository, description, suggested, model
+    )
+
+
+def _handle_confirm_bundle(
+    session_state: MutableMapping[str, Any],
+    repository: Any,
+    analysis_service: Any,
+    category: str,
+) -> None:
+    """Explicit confirmation of the visible bundle for exactly this category.
+
+    The intake layer refuses (and discards) a bundle that was extracted with another
+    category's vocabulary, so no stale candidate can become a USER fact.
+    """
+    answers = intake_flow.confirm_bundle(session_state, repository, category)
+    if not intake_flow.is_confirmed(session_state):
+        ui_state.set_flash(session_state, "intake_bundle_stale", "warning")
+        return
+    model, error_code = _resolve_model(session_state)
+    _run_canonical_analysis(session_state, repository, analysis_service, category, model)
+    if error_code:
+        ui_state.set_flash(session_state, error_code, "error")
+
+
+def _handle_use_category(
+    session_state: MutableMapping[str, Any],
+    repository: Any,
+    category: str,
+) -> None:
+    """Human confirmed/changed the category: read the details for THAT category.
+
+    Re-runs the extraction against the human-selected category's approved
+    vocabulary and drops any bundle (and analysis) derived from a different one.
+    """
+    session_state[ui_state.KEY_CONFIRMED_CATEGORY] = None
+    session_state[ui_state.KEY_ANALYSIS] = None
+    session_state[ui_state.KEY_ANALYSIS_META] = None
+    session_state[ui_state.KEY_WHAT_IF] = None
+    session_state[ui_state.KEY_WHAT_IF_INPUTS] = {}
+    session_state[ui_state.KEY_FACT_ANSWERS] = {}
+    intake_flow.clear_intake_extraction(session_state)
+    model, error_code = _resolve_model(session_state)
+    intake_flow.run_extraction(
+        session_state,
+        repository,
+        session_state.get(ui_state.KEY_DESCRIPTION) or "",
+        category,
+        model,
+    )
+    if error_code:
         ui_state.set_flash(session_state, error_code, "error")
 
 
@@ -159,7 +249,7 @@ def _handle_update_facts(
     analysis_service: Any,
     answers: dict[str, Any],
 ) -> None:
-    """Merge explicit user answers and re-run the canonical analysis."""
+    """Merge explicit answers from the advanced view and re-run the analysis."""
     stored = dict(session_state.get(ui_state.KEY_FACT_ANSWERS) or {})
     stored.update(answers)
     session_state[ui_state.KEY_FACT_ANSWERS] = stored
@@ -172,11 +262,6 @@ def _handle_update_facts(
         ui_state.set_flash(session_state, error_code, "error")
 
 
-def _attribute_name(repository: Any, attribute_id: str) -> str | None:
-    attribute = repository.get_attribute(attribute_id)
-    return attribute.attribute_name if attribute is not None else None
-
-
 def main() -> None:
     st.set_page_config(
         page_title=PAGE_TITLE,
@@ -186,6 +271,10 @@ def main() -> None:
     )
     session_state = st.session_state
     ui_state.initialize_state(session_state)
+    intake_flow.initialize_intake_state(session_state)
+    # An edited description invalidates unconfirmed extraction and its analysis.
+    if intake_flow.invalidate_if_stale(session_state):
+        ui_state.set_flash(session_state, "intake_edit_hint", "info")
     # Presentation controls mirror the language/theme state keys; reconcile before
     # the widgets are created so the visible control can never disagree with the
     # rendered language or theme.
@@ -205,82 +294,84 @@ def main() -> None:
     repository = get_repository()
     analysis_service = get_analysis_service()
 
-    # ---------------------------------------------------------------- section 1
-    if ui.render_product_section(session_state, lang):
-        _handle_analyze(session_state, repository)
-        st.rerun()
-
-    # ---------------------------------------------------------------- section 2
-    confirmed_category, confirm_clicked = ui.render_category_section(
-        session_state, repository, lang
-    )
-    if confirm_clicked and confirmed_category:
-        model, error_code = _resolve_model(session_state)
-        _run_canonical_analysis(
-            session_state, repository, analysis_service, confirmed_category, model
-        )
-        if error_code:
-            ui_state.set_flash(session_state, error_code, "error")
+    # ------------------------------------------------------- step 1: intake
+    if ui.render_intake_section(session_state, lang):
+        _handle_intake_analyze(session_state, repository)
         st.rerun()
 
     analysis = _load_analysis(session_state)
     meta = session_state.get(ui_state.KEY_ANALYSIS_META) or {}
+    confirmed_category = session_state.get(ui_state.KEY_CONFIRMED_CATEGORY)
 
-    # ---------------------------------------------------------------- section 3
-    if analysis is not None:
-        answers, update_clicked = ui.render_missing_information(
-            session_state, repository, analysis, lang
-        )
-        if update_clicked:
-            _handle_update_facts(session_state, repository, analysis_service, answers)
+    # ------------------------------------- step 2: AI understood + confirmation
+    if not confirmed_category:
+        selected, action = ui.render_ai_understood(session_state, repository, lang)
+        if action == "edit":
+            intake_flow.clear_intake_extraction(session_state)
+            ui_state.set_flash(session_state, "intake_edit_hint", "info")
             st.rerun()
+        if action == "use_category" and selected:
+            # Human category boundary: the details are (re)read with this category.
+            _handle_use_category(session_state, repository, selected)
+            st.rerun()
+        if action == "confirm" and selected:
+            _handle_confirm_bundle(
+                session_state, repository, analysis_service, selected
+            )
+            st.rerun()
+        return
 
-    # ---------------------------------------------------------------- section 4
-    ui.render_results(session_state, repository, analysis, meta, lang)
+    # ------------------------------------------- step 3: customer report
+    ui.render_customer_report(
+        repository,
+        analysis,
+        lang,
+        _category_status(session_state),
+        commercial_notes=intake_flow.notes(session_state),
+    )
 
     if analysis is None:
         return
 
-    category = session_state.get(ui_state.KEY_CONFIRMED_CATEGORY)
-    category_result = (
-        pipeline.category_result_for(repository, category) if category else None
-    )
-    if category_result is None or category_result.category_status.value != "RESOLVED":
-        st.markdown(f"#### {t('what_if_section', lang)}")
-        st.info(t("what_if_not_available", lang))
-        return
+    category_result = pipeline.category_result_for(repository, confirmed_category)
+    resolved = category_result.category_status.value == "RESOLVED"
 
-    overrides, run_what_if, reset_what_if = ui.render_what_if(
-        session_state, repository, analysis, category, lang
-    )
-    if reset_what_if:
-        ui_state.reset_what_if(session_state)
-        st.rerun()
-    if run_what_if:
-        if not overrides:
-            ui_state.set_flash(session_state, "what_if_override_required", "warning")
+    # ------------------------------------------- step 4: optional scenario
+    if resolved:
+        what_if_result = _load_what_if(session_state)
+        overrides, run_what_if, reset_what_if = ui.render_scenario_section(
+            session_state, repository, analysis, confirmed_category, lang, what_if_result
+        )
+        if reset_what_if:
+            ui_state.reset_what_if(session_state)
             st.rerun()
-        session_state[ui_state.KEY_WHAT_IF_INPUTS] = dict(overrides)
-        facts = pipeline.build_facts(session_state.get(ui_state.KEY_FACT_ANSWERS))
-        outcome = pipeline.run_what_if(
-            analysis_service, repository, category_result, facts, overrides
-        )
-        if outcome.ok and outcome.result is not None:
-            session_state[ui_state.KEY_WHAT_IF] = outcome.result.to_dict()
-        else:
-            session_state[ui_state.KEY_WHAT_IF] = None
-            ui_state.set_flash(
-                session_state, outcome.error_code or ui_state.ERROR_ANALYSIS_FAILED, "error"
+        if run_what_if:
+            if not overrides:
+                ui_state.set_flash(session_state, "what_if_override_required", "warning")
+                st.rerun()
+            session_state[ui_state.KEY_WHAT_IF_INPUTS] = dict(overrides)
+            facts = pipeline.build_facts(session_state.get(ui_state.KEY_FACT_ANSWERS))
+            outcome = pipeline.run_what_if(
+                analysis_service, repository, category_result, facts, overrides
             )
-        st.rerun()
+            if outcome.ok and outcome.result is not None:
+                session_state[ui_state.KEY_WHAT_IF] = outcome.result.to_dict()
+            else:
+                session_state[ui_state.KEY_WHAT_IF] = None
+                ui_state.set_flash(
+                    session_state,
+                    outcome.error_code or ui_state.ERROR_ANALYSIS_FAILED,
+                    "error",
+                )
+            st.rerun()
 
-    what_if_result = _load_what_if(session_state)
-    if what_if_result is not None:
-        ui.render_what_if_result(
-            what_if_result,
-            lambda attribute_id: _attribute_name(repository, attribute_id),
-            lang,
-        )
+    # ------------------------------------------- step 5: technical details
+    answers, update_clicked = ui.render_technical_details(
+        session_state, repository, analysis, meta, lang
+    )
+    if update_clicked:
+        _handle_update_facts(session_state, repository, analysis_service, answers)
+        st.rerun()
 
 
 if __name__ == "__main__":  # pragma: no cover - streamlit executes the module

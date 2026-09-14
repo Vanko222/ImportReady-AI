@@ -58,6 +58,23 @@ KEY_ANALYSIS_META = "ir_analysis_meta"
 KEY_WHAT_IF = "ir_what_if"
 KEY_WHAT_IF_INPUTS = "ir_what_if_inputs"
 KEY_FLASH = "ir_flash"
+# Consumer UX v2 intake flow: the non-canonical candidate bundle and the text it
+# was extracted from. Candidates become canonical facts only after confirmation.
+KEY_INTAKE_CANDIDATES = "ir_intake_candidates"
+KEY_INTAKE_NOTES = "ir_intake_notes"
+KEY_INTAKE_WARNINGS = "ir_intake_warnings"
+KEY_INTAKE_ERROR = "ir_intake_error"
+KEY_INTAKE_AI_USED = "ir_intake_ai_used"
+KEY_INTAKE_TEXT_USED = "ir_intake_text_used"
+KEY_INTAKE_CONFIRMED = "ir_intake_confirmed"
+#: The exact category the current candidate bundle was extracted for. The bundle may
+#: only become USER facts when this equals the human-confirmed category.
+KEY_INTAKE_CATEGORY_USED = "ir_intake_category_used"
+#: The category **selector widget** state. Streamlit keeps widget state independently
+#: of the canonical keys, so it is explicitly dropped whenever a new product workflow
+#: starts (Start Over, a new Analyze Product action, or a description edit) - otherwise
+#: a previous product's selection would override the new AI suggestion.
+KEY_INTAKE_CATEGORY_CONTROL = "ir_intake_category"
 
 MODE_DEMO = "demo"
 MODE_BYOK = "byok"
@@ -66,6 +83,8 @@ ACCESS_MODES: tuple[str, ...] = (MODE_DEMO, MODE_BYOK)
 #: Every session key that belongs to one product analysis. ``start_over`` clears
 #: exactly these and preserves presentation preferences (language, theme) plus, by
 #: deliberate decision, the session-only BYOK key (Clear Key remains explicit).
+#: The Consumer UX v2 intake keys are included so an unconfirmed extraction can
+#: never outlive the product it was derived from.
 ANALYSIS_SESSION_KEYS: tuple[str, ...] = (
     KEY_DESCRIPTION,
     KEY_SUGGESTION,
@@ -77,6 +96,16 @@ ANALYSIS_SESSION_KEYS: tuple[str, ...] = (
     KEY_WHAT_IF,
     KEY_WHAT_IF_INPUTS,
     KEY_FLASH,
+    # Consumer UX v2 intake artefacts, so an unconfirmed extraction can never
+    # outlive the product it was derived from.
+    KEY_INTAKE_CANDIDATES,
+    KEY_INTAKE_NOTES,
+    KEY_INTAKE_WARNINGS,
+    KEY_INTAKE_ERROR,
+    KEY_INTAKE_AI_USED,
+    KEY_INTAKE_TEXT_USED,
+    KEY_INTAKE_CONFIRMED,
+    KEY_INTAKE_CATEGORY_USED,
 )
 
 #: Fixed mask. It is a constant, never derived from the key material, so no part
@@ -184,6 +213,14 @@ def initialize_state(session_state: MutableMapping[str, Any]) -> None:
         KEY_WHAT_IF: None,
         KEY_WHAT_IF_INPUTS: {},
         KEY_FLASH: None,
+        KEY_INTAKE_CANDIDATES: [],
+        KEY_INTAKE_NOTES: [],
+        KEY_INTAKE_WARNINGS: [],
+        KEY_INTAKE_ERROR: None,
+        KEY_INTAKE_AI_USED: False,
+        KEY_INTAKE_TEXT_USED: "",
+        KEY_INTAKE_CONFIRMED: False,
+        KEY_INTAKE_CATEGORY_USED: None,
     }
     for key, value in defaults.items():
         if key not in session_state:
@@ -223,7 +260,20 @@ def start_over(session_state: MutableMapping[str, Any]) -> None:
         session_state.pop(key, None)
     session_state[KEY_FACT_ANSWERS] = {}
     session_state[KEY_WHAT_IF_INPUTS] = {}
+    # Widget state survives canonical-key cleanup on its own, so the category selector
+    # is dropped explicitly: the next product must default to its own suggestion.
+    session_state.pop(KEY_INTAKE_CATEGORY_CONTROL, None)
     initialize_state(session_state)
+
+
+def reset_category_control(session_state: MutableMapping[str, Any]) -> None:
+    """Drop the category selector widget state so it re-initialises from the suggestion.
+
+    Called when a new product workflow starts (Start Over, Analyze Product, or a
+    description edit that invalidates the previous extraction). The category is never
+    auto-confirmed: the customer still has to confirm it.
+    """
+    session_state.pop(KEY_INTAKE_CATEGORY_CONTROL, None)
 
 
 def reset_what_if(session_state: MutableMapping[str, Any]) -> None:

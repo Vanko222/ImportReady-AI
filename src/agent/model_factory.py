@@ -18,11 +18,28 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Mapping
+from typing import Any, Callable, Mapping
 
 from strands.models.model import Model
 
+# Official DeepSeek OpenAI-compatible endpoint (no /v1 suffix is required by the
+# adapter: the OpenAI SDK appends the Chat Completions path itself).
 _DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+
+# DeepSeek V4 enables thinking mode by default. ImportReady's Strands tool-call flow
+# does not replay `reasoning_content` across tool-call turns, so the official Chat
+# Completions option is sent explicitly, scoped to the exact `deepseek-v4-flash`
+# combination only. The OpenAI SDK accepts `extra_body` as a documented
+# `chat.completions.create` keyword argument and the Strands OpenAIModel forwards
+# combination `params` into that call verbatim, so this is the smallest supported
+# mechanism (no message rewriting, no reasoning_content handling).
+#
+# Historical evidence kept in the regression suite: a `thinking`/`extra_body`
+# payload sent to the *legacy* DeepSeek model id returned HTTP 400, which is why the
+# option is declared per combination and the legacy id declares none.
+_DEEPSEEK_V4_NON_THINKING_PARAMS: dict[str, Any] = {
+    "extra_body": {"thinking": {"type": "disabled"}},
+}
 
 
 class CompatibilityStatus(str, Enum):
@@ -43,6 +60,10 @@ class ModelCombination:
     ui_exposed: bool = False  # consumer-visible only when True AND VERIFIED
     certification_ref: str | None = None
     notes: str = ""
+    # Provider request options scoped to THIS exact combination only. A combination
+    # that does not declare any is built with no extra request parameters, so a
+    # model-specific option can never leak to another model or provider.
+    request_params: Mapping[str, Any] = field(default_factory=dict)
 
 
 # build(combination, runtime_fields, credential) -> Strands model object
@@ -84,16 +105,22 @@ def _build_bedrock(
 
 
 def _openai_compatible_builder(base_url: str) -> ProviderBuilder:
-    """Return a builder bound to an ImportReady-owned endpoint."""
+    """Return a builder bound to an ImportReady-owned endpoint.
+
+    Request parameters are read from the resolved **combination**, so a
+    model-specific option is sent only for the exact combination that declares it.
+    """
 
     def _build(
         combination: ModelCombination, runtime_fields: Mapping[str, str], credential: str | None
     ) -> object:
         from strands.models.openai import OpenAIModel
 
+        params = dict(getattr(combination, "request_params", None) or {})
         return OpenAIModel(
             client_args={"base_url": base_url, "api_key": credential},
             model_id=combination.model_id,
+            **({"params": params} if params else {}),
         )
 
     return _build
@@ -138,13 +165,30 @@ PROVIDER_REGISTRY: dict[str, ProviderDescriptor] = {
         combinations=(
             ModelCombination(
                 provider_id="deepseek",
+                model_id="deepseek-v4-flash",
+                # PROMOTED after the final live certification passed human review:
+                # 28 PASS / 0 FAIL / 0 BLOCKED / 6 NOT_RUN, requests 11/33 (see
+                # DeepSeek_V4_Final_Certification_Report.md §0.13).
+                compatibility_status=CompatibilityStatus.VERIFIED,
+                ui_exposed=True,
+                # Explicit non-thinking mode, scoped to this exact combination.
+                request_params=_DEEPSEEK_V4_NON_THINKING_PARAMS,
+                notes=(
+                    "CERTIFIED (human-approved): official DeepSeek V4 Flash on the "
+                    "OpenAI-compatible Chat Completions endpoint with thinking mode explicitly "
+                    "disabled. This exact combination is the only consumer-exposed DeepSeek "
+                    "combination; no other DeepSeek model inherits this status."
+                ),
+            ),
+            ModelCombination(
+                provider_id="deepseek",
                 model_id="deepseek-flash",
                 compatibility_status=CompatibilityStatus.EXPERIMENTAL,
                 ui_exposed=False,
                 notes=(
-                    "Current development/certification model. Single-turn tool use is verified; "
-                    "the multi-turn tool-result to final-answer gate is still pending, so this "
-                    "combination is not VERIFIED yet."
+                    "Legacy/stale DeepSeek model id, retained only so historical development "
+                    "runs fail loudly instead of being silently reused. It is NOT the formal "
+                    "certification target, is not VERIFIED and is never consumer-exposed."
                 ),
             ),
             ModelCombination(

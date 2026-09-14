@@ -8,6 +8,7 @@ tools) is exercised for real.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import warnings
 from dataclasses import dataclass, field, replace
@@ -16,8 +17,10 @@ from pathlib import Path
 import pytest
 
 from src.agent import model_factory
+from src.agent import response_guard as guard
 from src.agent.tools import build_tools
 from src.certification import certification as cert
+from src.certification.live_target import TOY_FIXTURE_FACTS, TOY_UNSTATED_ATTRIBUTES
 from src.repositories.compliance_repository import JsonComplianceRepository
 from src.services.analysis import AnalysisService
 from src.services.classification import (
@@ -32,6 +35,10 @@ from src.services.orchestrator import AgentRunOutcome, Orchestrator
 from src.state import FactOrigin, ProductFact
 
 SENTINEL = "sk-FAKE-TEST-KEY-ONLY"
+# The approved fixture declaration the live adapter supplies: case B withholds one required fact.
+OMITTED_FACTS_FIXTURE = {"B": ("A-ELEC-003",)}
+# Marker that identifies the children's-toy fixture description in the provider-side fake.
+TOY_DESCRIPTION_MARKER = "building blocks"
 REPO = JsonComplianceRepository()
 SERVICE = AnalysisService(REPO)
 ALLOWED = allowed_category_values(REPO)
@@ -67,6 +74,13 @@ def valid_value(attribute) -> object:
 def facts_for(case_id: str) -> list[ProductFact]:
     if case_id == "C":
         return []
+    if case_id == "D":
+        # The same approved children's-toy fixture the live adapter supplies.
+        return [
+            ProductFact(attribute_id=attribute_id, value=value, origin=FactOrigin.USER)
+            for attribute_id, value in TOY_FIXTURE_FACTS.items()
+            if REPO.get_attribute(attribute_id) is not None
+        ]
     facts: list[ProductFact] = []
     for attribute_id in ELEC002_REQUIRED:
         if case_id == "B" and attribute_id == "A-ELEC-003":
@@ -198,6 +212,9 @@ def make_target(
         counters["classify"] = counters.get("classify", 0) + 1
         if behaviour.suggestion_category is None or "pepper" in description:
             return suggestion(None, CategoryStatus.NEEDS_INFO)
+        if TOY_DESCRIPTION_MARKER.lower() in str(description).lower():
+            # The children's-toy fixture is classified as a toy (still agent_generated).
+            return suggestion("childrens_toys")
         return suggestion(behaviour.suggestion_category)
 
     def _confirm(case, classified, allowed):
@@ -218,7 +235,7 @@ def make_target(
 
     return cert.CertificationTarget(
         provider_id="deepseek",
-        model_id="deepseek-flash",
+        model_id="deepseek-v4-flash",
         allowed_values=lambda: ALLOWED,
         build_model=build_model or _build_model,
         minimal_request=minimal_request or _minimal,
@@ -232,7 +249,7 @@ def make_target(
 def full_run(**kwargs) -> cert.CertificationRecord:
     """Run with a fake provider target; runner-level kwargs are separated from target kwargs."""
     runner_keys = ("limits", "live", "environ", "literals", "clock", "repo_root", "evidence_out",
-                   "write_evidence_file")
+                   "write_evidence_file", "cases", "omitted_facts")
     runner_kwargs = {key: kwargs.pop(key) for key in runner_keys if key in kwargs}
     return cert.run_certification(make_target(**kwargs), **runner_kwargs)
 
@@ -262,7 +279,7 @@ def test_failure_category_renders_by_name_not_an_ordinal() -> None:
     assert cert.FailureCategory.CONFIGURATION_MISMATCH.value == "CONFIGURATION_MISMATCH"
     # The certification record renders the category name, not an ordinal.
     result = cert.GateResult(1, cert.GLOBAL_SCOPE, cert.GateStatus.FAIL, cert.FailureCategory.AUTH_FAILURE, ("x",))
-    record = cert.CertificationRecord(provider_id="deepseek", model_id="deepseek-flash", results=[result])
+    record = cert.CertificationRecord(provider_id="deepseek", model_id="deepseek-v4-flash", results=[result])
     markdown = record.render_markdown()
     assert "FAIL (AUTH_FAILURE)" in markdown and "FAIL (1)" not in markdown
 
@@ -274,7 +291,7 @@ def test_healthy_full_run_passes_and_records_every_gate() -> None:
     assert record.aggregates()[1] is cert.GateStatus.PASS
     assert record.aggregates()[9] is cert.GateStatus.PASS
     # 1 gate-1 request + 1 provider classification per case.
-    assert record.requests_used == 4
+    assert record.requests_used == 1 + len(cert.CASE_IDS)
 
 
 def test_aggregate_precedence_and_no_not_run_masking() -> None:
@@ -312,10 +329,10 @@ def test_gate1_runs_exactly_once_before_any_case() -> None:
     record = full_run(counters=counters)
     assert counters["build_model"] == 1
     assert counters["minimal_request"] == 1
-    assert counters["classify"] == 3
-    assert counters["run_case"] == 3
+    assert counters["classify"] == len(cert.CASE_IDS)
+    assert counters["run_case"] == len(cert.CASE_IDS)
     # 1 gate-1 request + 1 provider classification per case (classification is a provider interaction).
-    assert record.requests_used == 4
+    assert record.requests_used == 1 + len(cert.CASE_IDS)
     assert statuses(record, 1) == {"GLOBAL": "PASS"}
 
 
@@ -329,7 +346,7 @@ def test_gate9_is_global_and_runs_once() -> None:
 def test_every_case_scoped_gate_has_one_result_per_applicable_case() -> None:
     record = full_run()
     for gate in (2, 3, 4, 5, 6, 7, 8, 10):
-        assert set(statuses(record, gate)) == {"case:A", "case:B", "case:C"}
+        assert set(statuses(record, gate)) == {f"case:{case_id}" for case_id in cert.CASE_IDS}
 
 
 def test_a_failing_case_is_never_hidden_by_passing_cases() -> None:
@@ -701,7 +718,7 @@ def test_runner_writes_evidence_only_through_the_sanitizing_writer(tmp_path) -> 
 # =========================================================================== #
 def test_record_rendering_contains_required_sections() -> None:
     record = full_run()
-    record.evidence_path = "deepseek__deepseek-flash__stamp.txt"
+    record.evidence_path = "deepseek__deepseek-v4-flash__stamp.txt"
     record.evidence_sha256 = "a" * 64
     markdown = record.render_markdown()
     assert "## Gates (aggregate)" in markdown
@@ -726,13 +743,15 @@ def test_record_renders_observed_warnings_and_matrix_cells() -> None:
 # Group 11 — no registry/status mutation
 # =========================================================================== #
 def test_certification_never_promotes_or_exposes() -> None:
+    """Certification itself never mutates the registry — promotion is a separate, human-approved edit."""
     before = model_factory.provider_status_report()
     record = full_run()
     assert record.overall() == "PASS"
-    combination = model_factory.resolve_combination("deepseek", "deepseek-flash")
-    assert combination.compatibility_status is model_factory.CompatibilityStatus.EXPERIMENTAL
-    assert combination.ui_exposed is False
-    assert model_factory.verified_combinations() == []
+    combination = model_factory.resolve_combination("deepseek", "deepseek-v4-flash")
+    # The promoted (human-approved) state is what the registry holds; the certification RUN must not
+    # change any of it.
+    assert combination.compatibility_status is model_factory.CompatibilityStatus.VERIFIED
+    assert combination.ui_exposed is True
     assert model_factory.provider_status_report() == before
 
 
@@ -758,10 +777,11 @@ def test_budget_exhaustion_blocks_remaining_gates() -> None:
 def test_no_retries_and_confirmation_costs_no_provider_request() -> None:
     counters: dict = {}
     record = full_run(counters=counters)
-    assert counters["classify"] == 3 and counters["run_case"] == 3 and counters["confirm"] == 3
+    assert (counters["classify"] == counters["run_case"] == counters["confirm"]
+            == len(cert.CASE_IDS))
     assert counters["minimal_request"] == 1
     # gate 1 + one provider classification per case; the human confirmation costs nothing.
-    assert record.requests_used == 4
+    assert record.requests_used == 1 + len(cert.CASE_IDS)
 
     failing = cert.run_certification(make_target(Behaviour(minimal=RuntimeError("401 unauthorized"))))
     assert len([r for r in failing.results if r.gate == 1]) == 1
@@ -781,22 +801,23 @@ def test_import_and_preview_never_construct_a_model(monkeypatch) -> None:
     monkeypatch.setattr(model_factory, "build_model", _boom)
     from src.certification.__main__ import main
 
-    assert main(["--provider", "deepseek", "--model", "deepseek-flash"]) == 0
+    assert main(["--provider", "deepseek", "--model", "deepseek-v4-flash"]) == 0
 
 
 def test_live_cli_is_refused_offline() -> None:
     from src.certification.__main__ import main
 
-    assert main(["--provider", "deepseek", "--model", "deepseek-flash", "--live"]) == 2
-    assert main(["--provider", "deepseek", "--model", "deepseek-flash", "--cases", "A,D"]) == 2
+    assert main(["--provider", "deepseek", "--model", "deepseek-v4-flash", "--live"]) == 2
+    # "E" is not a registered case id (D is the children's-toy fixture and is valid).
+    assert main(["--provider", "deepseek", "--model", "deepseek-v4-flash", "--cases", "A,E"]) == 2
 
 
-def test_case_list_is_exactly_a_b_c() -> None:
-    assert cert.CASE_IDS == ("A", "B", "C")
+def test_case_list_is_exactly_a_b_c_d() -> None:
+    assert cert.CASE_IDS == ("A", "B", "C", "D")
     with pytest.raises(ValueError):
-        full_run_cases("D")
+        full_run_cases("E")
     with pytest.raises(ValueError):
-        full_run_cases("A", "D")
+        full_run_cases("A", "E")
 
 
 def full_run_cases(*cases):
@@ -945,11 +966,36 @@ def lifecycle_problems(text: str) -> list[str]:
     "R-ELEC-019 is mandatory.",
     "R-ELEC-019 is currently effective.",
     "R-ELEC-019 is the law.",
-    "R-ELEC-019 is proposed and further review is required.",   # rule_id + obligation, same sentence
-    "not currently effective for R-ELEC-019.",                  # a negation is still the same pairing
+    # The A5 vocabulary is context-aware: these are definite CURRENT obligations about the rule.
+    "R-ELEC-019 is currently required.",
+    "R-ELEC-019 must be complied with now.",
+    "This product has to meet R-ELEC-019.",
+    "R-ELEC-019 is in force.",
+    # A distant negation must never mask a real claim in the same sentence.
+    "R-ELEC-019 is not optional and is required.",
+    "R-ELEC-019 is not a suggestion; it is mandatory.",
+    "R-ELEC-019 must not be ignored and is required for this product.",
 ])
 def test_a5_lifecycle_forbids_obligation_wording_with_the_rule_id(text: str) -> None:
     assert any(problem.startswith("A5") for problem in lifecycle_problems(text)), text
+
+
+@pytest.mark.parametrize("text", [
+    "R-ELEC-019 is proposed and is not currently effective.",
+    "Monitor R-ELEC-019; it is not a current obligation.",
+    "R-ELEC-019 remains on the watchlist and human review is required.",
+    "R-ELEC-019 is proposed and further review is required.",
+    "Human review of R-ELEC-019 is required.",
+    "R-ELEC-019 is no longer required.",
+    "not currently effective for R-ELEC-019.",
+])
+def test_a5_lifecycle_accepts_safe_status_wording_with_the_rule_id(text: str) -> None:
+    """Regression (live Case B): negation and review/monitoring wording are not obligations.
+
+    A plain substring test failed exactly these safe sentences - "not currently effective" contains
+    "currently effective", and "review is required" contains "is required".
+    """
+    assert lifecycle_problems(text) == [], text
 
 
 def test_a5_lifecycle_accepts_separated_status_and_next_step() -> None:
@@ -975,6 +1021,152 @@ def test_a5_lifecycle_untouched_for_an_effective_rule() -> None:
     assert lifecycle_problems("R-ELEC-019 is currently effective.")          # still non-effective → A5
     assert cert.check_final_response("R-ELEC-019 is currently effective.", non_effective_rule_ids=(),
                                      review_status="REVIEW_REQUIRED") == []
+
+
+def test_a5_effective_applicable_rule_may_still_be_explained_as_required() -> None:
+    """The lifecycle guard must never suppress a real current obligation (EFFECTIVE + APPLICABLE)."""
+    problems = cert.check_final_response(
+        "R-ELEC-002 is required and applies to this product. The transmitter must comply with R-ELEC-002.",
+        canonical_applicable_rule_ids=("R-ELEC-002",),
+        non_effective_rule_ids=NON_EFFECTIVE,
+        review_status="REVIEW_REQUIRED",
+    )
+    assert problems == []
+
+
+def test_non_effective_rule_ids_covers_every_non_current_lifecycle() -> None:
+    result = {"verified": {"compliance_information": [
+        {"rule_id": "R-A", "rule_status": "EFFECTIVE", "evidence_status": "VERIFIED"},
+        {"rule_id": "R-B", "rule_status": "PROPOSED", "evidence_status": "VERIFIED"},
+        {"rule_id": "R-C", "rule_status": "WATCHLIST", "evidence_status": "VERIFIED"},
+        {"rule_id": "R-D", "rule_status": "SUPERSEDED", "evidence_status": "VERIFIED"},
+        {"rule_id": "R-E", "rule_status": "UNKNOWN", "evidence_status": "VERIFIED"},
+    ]}}
+    assert cert.non_effective_rule_ids(result) == ["R-B", "R-C", "R-D", "R-E"]
+
+
+# --------------------------------------------------------------------------- #
+# Live Case B regression: the final-response lifecycle chain
+# --------------------------------------------------------------------------- #
+LIFECYCLE_PROMOTION_TEXT = (
+    "R-ELEC-019 is currently required for this product and the importer must comply now."
+)
+
+
+def test_guarded_case_b_lifecycle_wording_passes_gate8() -> None:
+    """Regression (live Case B): the guard neutralises unconfirmed obligation wording before Gate 8."""
+    canonical = {
+        "review": {"status": "REVIEW_REQUIRED", "triggers": [], "reviewer_actions": []},
+        "applicability": {"rules": [
+            {"rule_id": "R-ELEC-002", "applicability_status": "APPLICABLE"},
+            {"rule_id": "R-ELEC-018", "applicability_status": "REVIEW_REQUIRED"},
+            {"rule_id": "R-ELEC-019", "applicability_status": "REVIEW_REQUIRED"},
+        ]},
+        "verified": {"compliance_information": [
+            {"rule_id": "R-ELEC-002", "rule_status": "EFFECTIVE", "evidence_status": "VERIFIED"},
+            {"rule_id": "R-ELEC-018", "rule_status": "WATCHLIST", "evidence_status": "VERIFIED"},
+            {"rule_id": "R-ELEC-019", "rule_status": "PROPOSED", "evidence_status": "VERIFIED"},
+        ]},
+    }
+    guarded, guard_result = guard.guard_observation_text(canonical, LIFECYCLE_PROMOTION_TEXT)
+    assert guard_result.activated is True
+    assert "R-ELEC-019 is PROPOSED" in guarded
+    assert "not confirmed as a current applicable obligation for this product" in guarded
+
+    observation = cert.CaseObservation(
+        analysis_result=canonical, final_text=guarded, tool_use_events=("analyze_product",),
+        tool_result_incorporated=True, continuation_turns=1, confirmation_action="confirm",
+        confirmation_value="small_consumer_electronics",
+    )
+    assert cert.run_gate8(cert.CASES["B"], observation).status is cert.GateStatus.PASS
+
+    # The same wording WITHOUT the guard is still an intentional Gate 8 failure.
+    unguarded = replace(observation, final_text=LIFECYCLE_PROMOTION_TEXT)
+    unsafe = cert.run_gate8(cert.CASES["B"], unguarded)
+    assert unsafe.status is cert.GateStatus.FAIL
+    assert unsafe.failure is cert.FailureCategory.FINAL_RESPONSE_FAILURE
+    assert any(problem.startswith("A5") for problem in unsafe.evidence)
+
+
+def test_a5_uses_applicability_not_only_lifecycle() -> None:
+    """The checker and the guard share one authority definition of a confirmed obligation."""
+    def authority(lifecycle: str, applicability: str):
+        return guard.RuleAuthority("R-X", lifecycle, applicability)
+
+    unsafe_text = "R-X is required for this product."
+    for lifecycle, applicability in (
+        ("EFFECTIVE", "NEEDS_INFO"),
+        ("EFFECTIVE", "NOT_APPLICABLE"),
+        ("EFFECTIVE", "REVIEW_REQUIRED"),
+        ("EFFECTIVE", ""),
+        ("PROPOSED", "APPLICABLE"),
+        ("WATCHLIST", "APPLICABLE"),
+        ("SUPERSEDED", "APPLICABLE"),
+        ("UNKNOWN", "APPLICABLE"),
+    ):
+        problems = cert.check_final_response(unsafe_text, rule_authorities=[authority(lifecycle, applicability)],
+                                             review_status="REVIEW_REQUIRED")
+        assert any(problem.startswith("A5") for problem in problems), (lifecycle, applicability)
+
+    # EFFECTIVE + APPLICABLE may be described as a current applicable requirement.
+    safe_text = "R-X is a current applicable requirement for this product."
+    assert cert.check_final_response(safe_text, rule_authorities=[authority("EFFECTIVE", "APPLICABLE")],
+                                     review_status="REVIEW_REQUIRED") == []
+
+
+def test_a5_catches_an_adjacent_reference_to_an_unconfirmed_rule() -> None:
+    """The checker shares the guard's narrow adjacent-reference rule (no LLM, no guessing)."""
+    authorities = [guard.RuleAuthority("R-X", "PROPOSED", "APPLICABLE")]
+    problems = cert.check_final_response("R-X is proposed. It is currently required.",
+                                         rule_authorities=authorities, review_status="REVIEW_REQUIRED")
+    assert any(problem.startswith("A5") for problem in problems)
+    assert cert.check_final_response("R-X is proposed. It is not currently effective.",
+                                     rule_authorities=authorities, review_status="REVIEW_REQUIRED") == []
+    ambiguous = [guard.RuleAuthority("R-X", "PROPOSED", "APPLICABLE"),
+                 guard.RuleAuthority("R-Y", "WATCHLIST", "APPLICABLE")]
+    assert cert.check_final_response("R-X is proposed and R-Y is on the watchlist. It is required.",
+                                     rule_authorities=ambiguous, review_status="REVIEW_REQUIRED") == []
+
+
+def test_lifecycle_guard_never_touches_the_canonical_result() -> None:
+    canonical = {
+        "review": {"status": "REVIEW_REQUIRED"},
+        "verified": {"compliance_information": [
+            {"rule_id": "R-ELEC-019", "rule_status": "PROPOSED", "evidence_status": "VERIFIED"},
+        ]},
+        "applicability": {"rules": [{"rule_id": "R-ELEC-019", "applicability_status": "REVIEW_REQUIRED"}]},
+    }
+    before = json.dumps(canonical, sort_keys=True)
+    guarded, guard_result = guard.guard_observation_text(canonical, LIFECYCLE_PROMOTION_TEXT)
+    assert guard_result.activated is True and guarded != LIFECYCLE_PROMOTION_TEXT
+    assert json.dumps(canonical, sort_keys=True) == before  # canonical result untouched
+    # The canonical lifecycle and applicability values the guard restates are exactly the canonical ones.
+    assert "R-ELEC-019 is PROPOSED with canonical applicability REVIEW_REQUIRED" in guarded
+    assert "not confirmed as a current applicable obligation for this product" in guarded
+    # ... and no workflow/legal duty is invented for a non-current rule.
+    for invented in ("human review", "monitoring", "still applies", "must comply"):
+        assert invented not in guarded.lower()
+
+
+def test_compliance_claim_protection_still_works_with_lifecycle_data() -> None:
+    canonical = {
+        "review": {"status": "REVIEW_REQUIRED"},
+        "applicability": {"rules": [
+            {"rule_id": "R-ELEC-019", "applicability_status": "REVIEW_REQUIRED"},
+        ]},
+        "verified": {"compliance_information": [
+            {"rule_id": "R-ELEC-019", "rule_status": "PROPOSED", "evidence_status": "VERIFIED"},
+        ]},
+    }
+    text = "The product is compliant. R-ELEC-019 is currently required."
+    guarded, guard_result = guard.guard_observation_text(canonical, text)
+    assert guard_result.activated is True
+    assert "is compliant" not in guarded.lower()
+    assert "currently required" not in guarded.lower()
+    assert any("is compliant" == finding.pattern for finding in guard_result.findings)
+    assert any(finding.pattern.startswith("unconfirmed current obligation (R-ELEC-019/PROPOSED/REVIEW_REQUIRED)")
+               for finding in guard_result.findings)
+    assert "not confirmed as a current applicable obligation for this product" in guarded
 
 
 # =========================================================================== #
@@ -1042,7 +1234,7 @@ def test_agent_generated_category_alone_never_unlocks_applicability() -> None:
 # Group 17 — CLI combination validation
 # =========================================================================== #
 def test_offline_preview_validates_the_exact_combination() -> None:
-    assert cert.offline_preview("deepseek", "deepseek-flash")[0] == 0
+    assert cert.offline_preview("deepseek", "deepseek-v4-flash")[0] == 0
     assert cert.offline_preview("deepseek", "deepseek-not-registered")[0] == 2
     assert cert.offline_preview("deepseek", "deepseek-chat")[0] == 2
     assert "UNSUPPORTED" in cert.offline_preview("deepseek", "deepseek-chat")[1]
@@ -1135,26 +1327,26 @@ def test_gate7_warning_absence_is_not_a_defect() -> None:
 # =========================================================================== #
 def test_preflight_accepts_an_exact_binding() -> None:
     preflight = cert.preflight_live_target(
-        "deepseek", "deepseek-flash", {"MODEL_PROVIDER": "deepseek", "MODEL_ID": "deepseek-flash"}
+        "deepseek", "deepseek-v4-flash", {"MODEL_PROVIDER": "deepseek", "MODEL_ID": "deepseek-v4-flash"}
     )
     assert preflight.ok is True
-    assert preflight.combination.model_id == "deepseek-flash"
+    assert preflight.combination.model_id == "deepseek-v4-flash"
 
 
 @pytest.mark.parametrize(
     "environ",
     [
-        {"MODEL_PROVIDER": "bedrock", "MODEL_ID": "deepseek-flash"},
+        {"MODEL_PROVIDER": "bedrock", "MODEL_ID": "deepseek-v4-flash"},
         {"MODEL_PROVIDER": "deepseek", "MODEL_ID": "other-model"},
         {"MODEL_PROVIDER": "deepseek"},
-        {"MODEL_ID": "deepseek-flash"},
+        {"MODEL_ID": "deepseek-v4-flash"},
         {},
         {"MODEL_PROVIDER": "deepseek", "MODEL_ID": "deepseek-chat"},
         {"MODEL_PROVIDER": "deepseek", "MODEL_ID": "unregistered-model"},
     ],
 )
 def test_preflight_refuses_any_mismatch(environ) -> None:
-    preflight = cert.preflight_live_target("deepseek", "deepseek-flash", environ)
+    preflight = cert.preflight_live_target("deepseek", "deepseek-v4-flash", environ)
     assert preflight.ok is False
     assert preflight.failure is cert.FailureCategory.CONFIGURATION_MISMATCH
 
@@ -1176,14 +1368,14 @@ def test_live_run_refuses_before_model_construction(monkeypatch) -> None:
 
 def test_live_run_proceeds_only_with_a_matching_target() -> None:
     counters: dict = {}
-    environment = {"MODEL_PROVIDER": "deepseek", "MODEL_ID": "deepseek-flash"}
+    environment = {"MODEL_PROVIDER": "deepseek", "MODEL_ID": "deepseek-v4-flash"}
     record = cert.run_certification(
         make_target(counters=counters), live=True, environ=environment, cases=("A",)
     )
     assert record.preflight_failure is None
     assert counters["build_model"] == 1
     assert "CLI == env" in record.validation
-    assert "EXPERIMENTAL" in record.validation
+    assert "status=VERIFIED" in record.validation  # the promoted, human-approved status
 
 
 # =========================================================================== #
@@ -1422,7 +1614,7 @@ def test_case_c_requires_both_observed_and_reference_results() -> None:
 # =========================================================================== #
 def test_record_skeleton_contains_all_approved_fields() -> None:
     record = full_run()
-    record.evidence_path = str(Path("C:/Users/Example/private/artifacts/deepseek__deepseek-flash.txt"))
+    record.evidence_path = str(Path("C:/Users/Example/private/artifacts/deepseek__deepseek-v4-flash.txt"))
     record.evidence_sha256 = "b" * 64
     record.unresolved_issues = ["reasoningContent warning classification pending"]
     record.recommendation = "hold at EXPERIMENTAL pending review"
@@ -1438,21 +1630,21 @@ def test_record_skeleton_contains_all_approved_fields() -> None:
                     "## Unresolved compatibility issues", "## Recommendation"):
         assert section in markdown
     assert "R-ELEC-002 canonical behaviour" in markdown
-    assert "deepseek__deepseek-flash.txt" in markdown
-    assert "A, B, C" in markdown
+    assert "deepseek__deepseek-v4-flash.txt" in markdown
+    assert "A, B, C, D" in markdown
     assert record.certified_at and record.certified_at.endswith("Z")
     assert "pending human review" in markdown
 
 
 def test_record_never_contains_an_absolute_local_path() -> None:
-    absolute = "C:\\Users\\Example\\ImportReady_AI_Certification_Artifacts\\deepseek__deepseek-flash__stamp.txt"
+    absolute = "C:\\Users\\Example\\ImportReady_AI_Certification_Artifacts\\deepseek__deepseek-v4-flash__stamp.txt"
     record = full_run()
     record.evidence_path = absolute
     markdown = record.render_markdown()
     assert absolute not in markdown
     assert "C:\\Users" not in markdown
-    assert "deepseek__deepseek-flash__stamp.txt" in markdown  # filename only
-    assert record.evidence_filename() == "deepseek__deepseek-flash__stamp.txt"
+    assert "deepseek__deepseek-v4-flash__stamp.txt" in markdown  # filename only
+    assert record.evidence_filename() == "deepseek__deepseek-v4-flash__stamp.txt"
 
 
 def test_runner_record_uses_the_artifact_filename_only(tmp_path) -> None:
@@ -1536,14 +1728,569 @@ def test_soft_limits_do_not_fire_when_time_is_nominal() -> None:
 
 
 def test_classification_is_charged_and_the_ceiling_cannot_be_bypassed() -> None:
-    record = cert.run_certification(make_target(Behaviour(provider_requests=8)), cases=("A",))
-    assert record.requests_used == 1 + 1 + 8  # gate 1 + classification + agent requests
+    # A case's ceiling covers its classification request PLUS its own agent requests (cumulative).
+    record = cert.run_certification(make_target(Behaviour(provider_requests=7)), cases=("A",))
+    assert record.requests_used == 1 + 1 + 7  # gate 1 + classification + agent requests
     assert one(record, 5, "case:A").status is cert.GateStatus.PASS
 
-    over = cert.run_certification(make_target(Behaviour(provider_requests=9)), cases=("A",))
+    # 1 classification + 8 agent requests = 9 for one case: over the per-case ceiling.
+    over = cert.run_certification(make_target(Behaviour(provider_requests=8)), cases=("A",))
     assert one(over, 5, "case:A").failure is cert.FailureCategory.BUDGET_EXHAUSTED
     assert over.overall() == "FAILED"
+
+    worse = cert.run_certification(make_target(Behaviour(provider_requests=9)), cases=("A",))
+    assert one(worse, 5, "case:A").failure is cert.FailureCategory.BUDGET_EXHAUSTED
+    assert worse.overall() == "FAILED"
 
     capped = cert.run_certification(make_target(Behaviour(provider_requests=0)), limits=cert.RunLimits(max_requests_total=1))
     assert one(capped, 2, "case:A").failure is cert.FailureCategory.BUDGET_EXHAUSTED
     assert capped.overall() == "FAILED"
+
+
+# =========================================================================== #
+# Review repair — Case C safe boundary (checker only)
+# =========================================================================== #
+def decline_confirm(case, classified, allowed):
+    """The live framework's safe decline for the out-of-scope case (A/B confirm normally)."""
+    if not case.agent_gates:
+        return "decline", None
+    return default_confirm(case, classified, allowed)
+
+
+def test_case_c_safe_decline_passes_gate10_without_a_fabricated_result() -> None:
+    """Regression: the real Case C outcome (safe NEEDS_INFO decline) must not BLOCK gate 10."""
+    case = cert.CASES["C"]
+    observation = cert.CaseObservation(
+        classification=suggestion(None, CategoryStatus.NEEDS_INFO),
+        confirmation_action="decline",
+        confirmation_value=None,
+        blocked=cert.FailureCategory.CATEGORY_NOT_CONFIRMED,
+    )
+    result = cert.run_gate10(case, observation)
+    assert result.status is cert.GateStatus.PASS
+    evidence = " ".join(result.evidence)
+    assert "category=None" in evidence and "status=NEEDS_INFO" in evidence
+    assert "safe boundary preserved" in evidence
+    assert "supported compliance conclusion" in evidence
+    # Nothing canonical was manufactured to make the gate pass.
+    assert observation.analysis_result is None and observation.offline_result is None
+    assert "case:C" == result.scope
+
+
+def test_case_c_safe_decline_does_not_fail_the_whole_run() -> None:
+    """The reported blocker: a decline for the unsupported case turned overall status FAILED."""
+    record = full_run(confirm=decline_confirm)
+    assert one(record, 2, "case:C").status is cert.GateStatus.PASS
+    assert one(record, 10, "case:C").status is cert.GateStatus.PASS
+    assert one(record, 3, "case:C").status is cert.GateStatus.NOT_RUN
+    assert cert.GateStatus.BLOCKED not in record.aggregates().values()
+    assert record.overall() == "PASS"
+    # Supported cases keep their canonical comparison in the same run.
+    assert one(record, 10, "case:A").status is cert.GateStatus.PASS
+    assert one(record, 10, "case:B").status is cert.GateStatus.PASS
+
+
+def test_case_c_never_awards_a_pass_to_unsafe_or_incomplete_evidence() -> None:
+    case = cert.CASES["C"]
+    safe = offline_result(case, "unsupported")
+    # One-sided evidence is genuinely incomplete.
+    assert cert.run_gate10(case, cert.CaseObservation(offline_result=safe)).status is cert.GateStatus.BLOCKED
+    assert cert.run_gate10(case, cert.CaseObservation(analysis_result=safe)).status is cert.GateStatus.BLOCKED
+    # No classification at all is not a verified safe boundary.
+    assert cert.run_gate10(case, cert.CaseObservation()).status is cert.GateStatus.BLOCKED
+    # A crash / budget stop is not a safe boundary either.
+    crashed = cert.CaseObservation(classification=suggestion(None, CategoryStatus.NEEDS_INFO),
+                                   blocked=cert.FailureCategory.TIMEOUT)
+    assert cert.run_gate10(case, crashed).status is cert.GateStatus.BLOCKED
+    # A resolved-looking status for an out-of-scope product is unsafe.
+    resolved = cert.CaseObservation(classification=suggestion(None, CategoryStatus.RESOLVED),
+                                    blocked=cert.FailureCategory.CATEGORY_NOT_CONFIRMED)
+    assert cert.run_gate10(case, resolved).status is cert.GateStatus.FAIL
+
+
+def test_case_c_routed_into_a_supported_category_fails_gate10() -> None:
+    """The model proposing an in-scope category must never be certified as coverage."""
+    case = cert.CASES["C"]
+    routed = cert.CaseObservation(
+        classification=suggestion("small_consumer_electronics"),
+        confirmation_action="confirm",
+        confirmation_value="small_consumer_electronics",
+    )
+    result = cert.run_gate10(case, routed)
+    assert result.status is cert.GateStatus.FAIL
+    assert result.failure is cert.FailureCategory.CANONICAL_RESULT_MISMATCH
+
+
+def test_case_c_supported_category_suggestion_with_a_decline_is_recorded_not_failed() -> None:
+    """The suggestion is never canonical; the declined boundary is the safety property."""
+    case = cert.CASES["C"]
+    observation = cert.CaseObservation(
+        classification=suggestion("small_consumer_electronics"),
+        confirmation_action="decline",
+        confirmation_value=None,
+        blocked=cert.FailureCategory.CATEGORY_NOT_CONFIRMED,
+    )
+    result = cert.run_gate10(case, observation)
+    assert result.status is cert.GateStatus.PASS
+    assert "declined it" in " ".join(result.evidence)
+
+
+def test_supported_cases_still_require_exact_canonical_equality() -> None:
+    """The Case C repair must not weaken the supported cases."""
+
+    def altered_observed(model, case, confirmed):
+        observation = observed_run_case(Behaviour(), case, confirmed)
+        if case.case_id == "A" and observation.analysis_result:
+            observation.analysis_result = dict(observation.analysis_result)
+            observation.analysis_result["review"] = {"status": "COMPLETE", "triggers": [],
+                                                     "reviewer_actions": []}
+        return observation
+
+    broken = full_run(run_case=altered_observed)
+    assert one(broken, 5, "case:A").status is cert.GateStatus.FAIL
+    assert one(broken, 5, "case:A").failure is cert.FailureCategory.CANONICAL_RESULT_MISMATCH
+    assert one(broken, 10, "case:A").status is cert.GateStatus.FAIL
+    assert broken.overall() == "FAILED"
+    # Case B was untouched by the injection and still passes on exact equality.
+    assert one(broken, 10, "case:B").status is cert.GateStatus.PASS
+
+
+# =========================================================================== #
+# Review repair — explicit invariant evidence
+# =========================================================================== #
+def test_relec002_invariant_is_explicitly_evaluated_and_passes() -> None:
+    record = full_run()
+    evidence = {item.name: item for item in record.invariant_evidence}
+    item = next(value for name, value in evidence.items() if name.startswith("R-ELEC-002"))
+    assert item.status is cert.GateStatus.PASS
+    assert "R-ELEC-002 preserved verbatim" in item.detail
+    assert "A" in item.detail  # the full-fact case actually exercised it
+    assert ("R-ELEC-002 canonical behaviour (7 required attributes)", "PASS") in record.invariants()
+
+
+def test_relec002_invariant_fails_when_the_agent_path_alters_the_verdict() -> None:
+    def altered(model, case, confirmed):
+        observation = observed_run_case(Behaviour(), case, confirmed)
+        if case.case_id == "A" and observation.analysis_result:
+            result = dict(observation.analysis_result)
+            applicability = dict(result.get("applicability") or {})
+            applicability["rules"] = [
+                {**rule, "applicability_status": "NOT_APPLICABLE"}
+                if rule.get("rule_id") == "R-ELEC-002" else rule
+                for rule in applicability.get("rules") or []
+            ]
+            result["applicability"] = applicability
+            observation.analysis_result = result
+        return observation
+
+    record = full_run(run_case=altered)
+    item = next(e for e in record.invariant_evidence if e.name.startswith("R-ELEC-002"))
+    assert item.status is cert.GateStatus.FAIL
+    assert "R-ELEC-002 applicability_status changed" in item.detail
+    assert record.overall() == "FAILED"  # an invariant FAIL is never reported as PASS
+    assert ("R-ELEC-002 canonical behaviour (7 required attributes)", "FAIL") in record.invariants()
+
+
+def test_relec002_invariant_is_blocked_when_no_case_supplies_the_full_fact_set() -> None:
+    record = full_run(cases=("B",), omitted_facts=OMITTED_FACTS_FIXTURE)  # B omits one required fact
+    item = next(e for e in record.invariant_evidence if e.name.startswith("R-ELEC-002"))
+    assert item.status is cert.GateStatus.BLOCKED
+    assert "never with all required USER facts supplied" in item.detail
+
+
+def test_lifecycle_invariant_proves_watchlist_and_proposed_stay_non_current() -> None:
+    record = full_run()
+    item = next(e for e in record.invariant_evidence if e.name.startswith("R-ELEC-018"))
+    assert item.status is cert.GateStatus.PASS
+    assert "R-ELEC-018" in item.detail and "R-ELEC-019" in item.detail
+
+
+def test_lifecycle_invariant_fails_when_the_agent_result_promotes_a_watchlist_rule() -> None:
+    def promoted(model, case, confirmed):
+        observation = observed_run_case(Behaviour(), case, confirmed)
+        if case.case_id == "A" and observation.analysis_result:
+            result = dict(observation.analysis_result)
+            verified = dict(result.get("verified") or {})
+            verified["compliance_information"] = [
+                ({**finding, "rule_status": "EFFECTIVE"} if finding.get("rule_id") == "R-ELEC-018"
+                 else finding)
+                for finding in verified.get("compliance_information") or []
+            ]
+            result["verified"] = verified
+            observation.analysis_result = result
+        return observation
+
+    record = full_run(run_case=promoted)
+    item = next(e for e in record.invariant_evidence if e.name.startswith("R-ELEC-018"))
+    assert item.status is cert.GateStatus.FAIL
+    assert "R-ELEC-018 rule_status is 'EFFECTIVE'" in item.detail
+
+
+def test_lifecycle_invariant_fails_when_prose_asserts_a_watchlist_rule_as_current() -> None:
+    prose = ("R-ELEC-018 must comply with the current labeling requirement.")
+    record = full_run(behaviour=Behaviour(final_text=prose))
+    item = next(e for e in record.invariant_evidence if e.name.startswith("R-ELEC-018"))
+    assert item.status is cert.GateStatus.FAIL
+    assert "asserted R-ELEC-018 as a current obligation" in item.detail
+
+
+def test_missing_facts_invariant_proves_the_omitted_fact_stays_missing() -> None:
+    record = full_run()
+    item = next(e for e in record.invariant_evidence if e.name.startswith("missing facts"))
+    assert item.status is cert.GateStatus.PASS
+    assert "A-ELEC-003" in item.detail
+
+
+def test_missing_facts_invariant_fails_if_the_agent_result_supplies_the_omitted_fact() -> None:
+    def inventoried(model, case, confirmed):
+        observation = observed_run_case(Behaviour(), case, confirmed)
+        if case.case_id == "B" and observation.analysis_result:
+            result = json.loads(json.dumps(observation.analysis_result))
+            unknown = dict(result.get("unknown") or {})
+            unknown["missing_information"] = [
+                entry for entry in unknown.get("missing_information") or []
+                if entry.get("attribute_id") != "A-ELEC-003"
+            ]
+            result["unknown"] = unknown
+            for rule in (result.get("applicability") or {}).get("rules") or []:
+                rule["missing_attribute_ids"] = [
+                    attribute_id for attribute_id in rule.get("missing_attribute_ids") or []
+                    if attribute_id != "A-ELEC-003"
+                ]
+            observation.analysis_result = result
+        return observation
+
+    record = full_run(run_case=inventoried, omitted_facts=OMITTED_FACTS_FIXTURE)
+    item = next(e for e in record.invariant_evidence if e.name.startswith("missing facts"))
+    assert item.status is cert.GateStatus.FAIL
+    assert "A-ELEC-003 did not remain missing" in item.detail
+    assert record.overall() == "FAILED"
+
+
+# =========================================================================== #
+# Review repair — offline vs live metadata, case traceability, response guard
+# =========================================================================== #
+def test_offline_and_live_target_metadata_are_never_confused() -> None:
+    offline = full_run(live=True, environ={})
+    assert offline.mode == "live"
+    markdown = offline.render_markdown()
+    assert offline.target_kind == "injected_offline_target"
+    assert "| target kind | injected_offline_target |" in markdown
+    assert "| endpoint strategy | n/a (offline injected target) |" in markdown
+    assert "| provider base URL | n/a (injected offline target) |" in markdown
+    assert "real_live_provider_target" not in markdown
+
+    real = cert.run_certification(
+        replace(make_target(), target_kind="real_live_provider_target",
+                endpoint_strategy="environment-driven factory via the official endpoint",
+                base_url="https://api.deepseek.com"),
+        cases=("A",), live=False,
+    )
+    live_markdown = real.render_markdown()
+    assert "| target kind | real_live_provider_target |" in live_markdown
+    assert "| provider base URL | https://api.deepseek.com |" in live_markdown
+    assert "| execution mode | offline |" in live_markdown
+
+
+def test_record_metadata_never_contains_credential_material() -> None:
+    secret = "ds-live-9f3a2b7c4e5d"
+    record = full_run(behaviour=Behaviour(final_text=GOOD_TEXT), literals=(secret,))
+    markdown = record.render_markdown()
+    assert secret not in markdown
+    for forbidden in ("api_key", "api-key", "authorization", "bearer "):
+        assert forbidden not in markdown.lower()
+    assert "https://api.deepseek.com" not in markdown or "provider base URL" in markdown
+
+
+def test_case_inputs_are_traceable_without_secrets() -> None:
+    record = full_run(omitted_facts=OMITTED_FACTS_FIXTURE)
+    by_case = {entry["case_id"]: entry for entry in record.case_inputs}
+    assert set(by_case) == set(cert.CASE_IDS)
+    assert by_case["A"]["expected_category"] == "small_consumer_electronics"
+    assert by_case["A"]["omitted_facts"] == "none"
+    assert by_case["B"]["omitted_facts"] == "A-ELEC-003"
+    assert by_case["C"]["expected_category"] == "none (out of scope)"
+    assert by_case["C"]["agent_gates"].startswith("no")
+    for entry in by_case.values():
+        assert entry["fixture"] and entry["description"]
+    markdown = record.render_markdown()
+    assert "## Case inputs (fixtures)" in markdown
+    assert "bulk ground black pepper spice blend" in markdown
+
+
+def test_case_coverage_gap_is_stated_not_hidden() -> None:
+    """Children's toys are covered by Case D; `dual` is still uncovered and stated explicitly."""
+    notes = cert.case_coverage_notes()
+    assert not any("childrens_toys" in note for note in notes), notes
+    assert any("dual" in note for note in notes)
+    record = full_run()
+    assert any("dual" in issue for issue in record.unresolved_issues)
+    assert not any("childrens_toys" in issue for issue in record.unresolved_issues)
+    assert "dual" in record.render_markdown()
+
+
+def test_response_guard_chain_is_recorded_and_does_not_fail_the_run() -> None:
+    """An intercepted compliance claim is reported as a chain, not as a run failure."""
+    observation = cert.CaseObservation(
+        response_guard=("response guard: 1 compliance conclusion(s) rewritten", "chain: observed -> intercepted"),
+    )
+    assert observation.response_guard
+    record = full_run()
+    # The offline fake never emits unsafe prose, so the guard is honestly reported as inactive.
+    assert "not activated in this run" in record.render_markdown()
+    guarded = cert.CaseObservation(
+        response_guard=("response guard: 1 compliance conclusion(s) rewritten",),
+    )
+    assert "compliance conclusion" in guarded.response_guard[0]
+
+
+def test_certification_never_mutates_the_canonical_results_it_inspects() -> None:
+    """Certification is a read-only observer: it compares canonical views, never rewrites them."""
+    observed_views: dict[str, str] = {}
+
+    def spying(model, case, confirmed):
+        observation = observed_run_case(Behaviour(), case, confirmed)
+        observed_views[case.case_id] = json.dumps(
+            cert.canonical_view(observation.analysis_result), sort_keys=True, default=str
+        )
+        return observation
+
+    record = full_run(run_case=spying)
+    assert record.overall() == "PASS"
+    # The agent path's canonical projection is byte-identical to the deterministic reference.
+    for case_id in ("A", "B"):
+        case = cert.CASES[case_id]
+        expected = json.dumps(
+            cert.canonical_view(offline_result(case, case.expected_category or "unsupported")),
+            sort_keys=True, default=str,
+        )
+        assert observed_views[case_id] == expected
+    assert one(record, 10, "case:A").status is cert.GateStatus.PASS
+
+
+# =========================================================================== #
+# Children's-toy fixture (Case D)
+# =========================================================================== #
+def test_case_d_exists_with_the_approved_toy_fixture() -> None:
+    assert "D" in cert.CASES
+    case = cert.CASES["D"]
+    assert case.fixture_id == "D-toy-wooden-blocks"
+    assert case.agent_gates is True
+    assert case.out_of_scope is False
+    # The description is children's-toy oriented and asserts nothing regulatory.
+    lowered = case.description.lower()
+    assert "children" in lowered and "toy" in lowered
+    assert "wooden building blocks" in lowered
+    for forbidden in ("astm", "lead free", "certified", "compliant", "safe to import", "approved"):
+        assert forbidden not in lowered
+
+
+def test_case_d_expects_childrens_toys_and_needs_human_confirmation() -> None:
+    """The agent suggestion stays agent_generated/REVIEW_REQUIRED until the boundary confirms."""
+    case = cert.CASES["D"]
+    assert case.expected_category == "childrens_toys"
+    classified = suggestion("childrens_toys")
+    assert classified.category_source is CategorySource.AGENT_GENERATED
+    assert classified.category_status is CategoryStatus.REVIEW_REQUIRED
+    assert cert.run_gate2(case, cert.CaseObservation(classification=classified), ALLOWED).status is (
+        cert.GateStatus.PASS
+    )
+    # A non-confirmed run must never award the agent gates.
+    declined = cert.CaseObservation(classification=classified, confirmation_action="decline",
+                                    confirmation_value=None,
+                                    blocked=cert.FailureCategory.CATEGORY_NOT_CONFIRMED)
+    for gate_runner in (cert.run_gate3, cert.run_gate4, cert.run_gate5, cert.run_gate6,
+                        cert.run_gate8):
+        assert gate_runner(case, declined).status is cert.GateStatus.BLOCKED
+    assert cert.run_gate10(case, declined).status is cert.GateStatus.BLOCKED
+    assert cert.run_gate10(case, declined).evidence == ("missing canonical result for comparison",)
+
+
+def test_case_d_exercises_the_supported_case_agent_gates() -> None:
+    record = full_run()
+    assert one(record, 2, "case:D").status is cert.GateStatus.PASS
+    assert one(record, 2, "case:D").evidence[1] == "source=agent_generated"
+    assert one(record, 2, "case:D").evidence[2] == "status=REVIEW_REQUIRED"
+    for gate in (3, 4, 5, 6, 7, 8, 10):
+        assert one(record, gate, "case:D").status is cert.GateStatus.PASS, gate
+
+
+def test_case_d_canonical_comparison_is_strict() -> None:
+    """Case D uses exactly the supported-case comparison: any alteration fails."""
+
+    def altered(model, case, confirmed):
+        observation = observed_run_case(Behaviour(), case, confirmed)
+        if case.case_id == "D" and observation.analysis_result:
+            result = dict(observation.analysis_result)
+            applicability = dict(result.get("applicability") or {})
+            applicability["rules"] = [
+                {**rule, "applicability_status": "APPLICABLE"} if rule.get("rule_id") == "R-TOY-010"
+                else rule
+                for rule in applicability.get("rules") or []
+            ]
+            result["applicability"] = applicability
+            observation.analysis_result = result
+        return observation
+
+    broken = full_run(run_case=altered)
+    assert one(broken, 5, "case:D").status is cert.GateStatus.FAIL
+    assert one(broken, 10, "case:D").status is cert.GateStatus.FAIL
+    assert one(broken, 10, "case:D").failure is cert.FailureCategory.CANONICAL_RESULT_MISMATCH
+    # A and B are untouched by the toy-case alteration.
+    assert one(broken, 10, "case:A").status is cert.GateStatus.PASS
+    assert one(broken, 10, "case:B").status is cert.GateStatus.PASS
+
+
+def test_case_d_leaves_unstated_toy_facts_missing() -> None:
+    """Only the explicitly stated fact is supplied; every unstated toy attribute stays missing."""
+    supplied = set(TOY_FIXTURE_FACTS)
+    assert supplied == {"A-TOY-001"}  # the description states the age and nothing else
+    result = offline_result(cert.CASES["D"], "childrens_toys")
+    missing = cert._missing_attribute_ids(result)
+    assert supplied.isdisjoint(missing)
+    # Unstated features are missing, NOT recorded as False USER facts.
+    assert set(TOY_UNSTATED_ATTRIBUTES) <= missing
+    toy_missing = {attribute_id for attribute_id in missing if attribute_id.startswith("A-TOY")}
+    assert {"A-TOY-005", "A-TOY-013"} <= toy_missing
+    assert not {attribute_id for attribute_id in supplied if attribute_id.startswith("A-ELEC")}
+    observed = observed_run_case(Behaviour(), cert.CASES["D"], "childrens_toys")
+    assert set(cert._missing_attribute_ids(observed.analysis_result)) == missing
+    # The agent path infers nothing: the unstated attributes stay missing in the tool result too.
+    assert set(TOY_UNSTATED_ATTRIBUTES) <= cert._missing_attribute_ids(observed.analysis_result)
+    # No toy rule is forced APPLICABLE merely because the description omitted a feature.
+    assert not [rule_id for rule_id in cert.applicable_rule_ids(observed.analysis_result)
+                if rule_id.startswith("R-TOY")]
+    # Canonical equality with the deterministic reference remains strict.
+    assert cert.compare_canonical(observed.analysis_result, result) == []
+    assert cert.lifecycle_problems(observed.analysis_result) == []
+    observed_findings = {f["rule_id"]: f["rule_status"] for f in
+                         ((observed.analysis_result.get("verified") or {}).get("compliance_information") or [])}
+    reference_findings = {f["rule_id"]: f["rule_status"] for f in
+                          ((result.get("verified") or {}).get("compliance_information") or [])}
+    assert observed_findings == reference_findings
+
+
+def test_case_d_supplies_only_the_stated_age_as_a_user_fact() -> None:
+    """The fixture is fact-authority clean: no inference from absence."""
+    from src.certification.live_target import build_case_facts
+
+    facts = build_case_facts(cert.CASES["D"], REPO)
+    assert [(fact.attribute_id, fact.value, fact.origin) for fact in facts] == [
+        ("A-TOY-001", 36, FactOrigin.USER)
+    ]
+    # No unstated attribute is present in the fixture, and no product fact claims a False absence.
+    assert not ({fact.attribute_id for fact in facts} & set(TOY_UNSTATED_ATTRIBUTES))
+    assert all(fact.value is not False for fact in facts)
+
+
+def test_case_d_fixture_facts_use_only_approved_attributes() -> None:
+    from src.certification.live_target import build_case_facts
+
+    facts = build_case_facts(cert.CASES["D"], REPO)
+    assert {fact.attribute_id for fact in facts} == set(TOY_FIXTURE_FACTS)
+    for fact in facts:
+        attribute = REPO.get_attribute(fact.attribute_id)
+        assert attribute is not None and attribute.category == "childrens_toys"
+        assert fact.origin is FactOrigin.USER
+
+
+def test_case_d_does_not_weaken_the_electronics_invariants() -> None:
+    """Adding the toy case must leave the R-ELEC-002 and lifecycle evidence intact."""
+    record = full_run()
+    evidence = {item.name: item for item in record.invariant_evidence}
+    relec = next(item for name, item in evidence.items() if name.startswith("R-ELEC-002"))
+    lifecycle = next(item for name, item in evidence.items() if name.startswith("R-ELEC-018"))
+    assert relec.status is cert.GateStatus.PASS and "A" in relec.detail
+    assert lifecycle.status is cert.GateStatus.PASS
+    # The toy case contributed nothing to the electronics evidence.
+    assert "D" not in relec.detail
+
+
+def test_request_budget_covers_every_case_including_the_toy_fixture() -> None:
+    limits = cert.RunLimits()
+    # 1 GLOBAL gate-1 request + one per-case ceiling for every configured case.
+    assert limits.max_requests_total == 1 + cert.MAX_REQUESTS_PER_CASE * len(cert.CASE_IDS)
+    assert limits.max_requests_total == 33  # not the stale 24 (3 cases) or 32 (gate 1 omitted)
+    assert limits.max_requests_per_case == 8
+    record = full_run()
+    assert record.requests_used == 1 + len(cert.CASE_IDS)  # gate 1 + one classification per case
+    assert record.requests_used <= record.limits.max_requests_total
+    assert f"requests {record.requests_used}/{record.limits.max_requests_total}" in record.evidence_summary()
+    assert f"/33" in record.evidence_summary()
+    assert "D" in {entry["case_id"] for entry in record.case_inputs}
+    assert "D" in record.cases_run
+
+
+def test_gate_one_request_is_counted_in_the_global_total() -> None:
+    budget = cert.RunBudget()
+    assert budget.charge(1) is True          # GLOBAL gate 1
+    assert budget.requests == 1
+    assert budget.case_requests("A") == 0    # it is not charged to any case
+    assert budget.charge(cert.MAX_REQUESTS_PER_CASE, case_id="A") is True
+    assert budget.requests == 1 + cert.MAX_REQUESTS_PER_CASE
+
+
+def test_every_configured_case_can_reach_its_own_ceiling() -> None:
+    """The total must let all cases hit their per-case ceiling - gate 1 included."""
+    budget = cert.RunBudget()
+    assert budget.charge(1) is True
+    for case_id in cert.CASE_IDS:
+        assert budget.charge(1, case_id=case_id) is True                                   # classification
+        assert budget.charge(cert.MAX_REQUESTS_PER_CASE - 1, case_id=case_id) is True       # agent turns
+        assert budget.case_requests(case_id) == cert.MAX_REQUESTS_PER_CASE
+    assert budget.requests == budget.limits.max_requests_total == 33
+    # The global ceiling is still enforced after every case is at its ceiling.
+    assert budget.charge(1, case_id="D") is False
+    assert budget.requests == 33
+
+
+def test_per_case_ceiling_is_cumulative() -> None:
+    """1 classification + 7 agent requests = 8 (allowed); 1 + 8 = 9 (blocked)."""
+    allowed = cert.RunBudget()
+    assert allowed.charge(1, case_id="A") is True
+    assert allowed.charge(7, case_id="A") is True
+    assert allowed.case_requests("A") == 8
+    assert allowed.requests == 8
+
+    blocked = cert.RunBudget()
+    assert blocked.charge(1, case_id="A") is True
+    assert blocked.charge(8, case_id="A") is False       # 1 + 8 = 9 > 8
+    assert blocked.case_requests("A") == 1               # a refused charge never mutates state
+    assert blocked.requests == 1
+    # A smaller top-up is still allowed up to the ceiling.
+    assert blocked.charge(7, case_id="A") is True
+    assert blocked.case_requests("A") == 8
+
+
+def test_one_case_cannot_consume_another_cases_budget() -> None:
+    budget = cert.RunBudget()
+    budget.charge(1)
+    assert budget.charge(8, case_id="A") is True
+    assert budget.case_requests("A") == 8
+    assert budget.charge(8, case_id="A") is False        # A is exhausted
+    assert budget.case_requests("B") == 0
+    assert budget.charge(8, case_id="B") is True         # B keeps its own full ceiling
+    assert budget.case_requests("B") == 8
+
+
+def test_global_ceiling_is_enforced_across_cases() -> None:
+    budget = cert.RunBudget(limits=cert.RunLimits(max_requests_total=5, max_requests_per_case=8))
+    assert budget.charge(1) is True
+    assert budget.charge(4, case_id="A") is True
+    assert budget.charge(1, case_id="B") is False        # 5 + 1 > 5 global
+    assert budget.requests == 5
+
+
+def test_report_renders_case_d_safely() -> None:
+    record = full_run()
+    markdown = record.render_markdown()
+    assert "D-toy-wooden-blocks" in markdown
+    assert "Wooden building blocks for children ages 3 and up" in markdown
+    assert "childrens_toys" in markdown
+    assert "| D |" in markdown  # the fixture table row
+    for forbidden in ("sk-", "api_key", "authorization", "bearer "):
+        assert forbidden not in markdown.lower()
+    # The coverage note now lists only `dual`.
+    assert "no certification fixture covers the supported category 'dual'" in markdown
+    assert "childrens_toys'; add a case" not in markdown
+

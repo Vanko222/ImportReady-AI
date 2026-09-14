@@ -820,6 +820,44 @@ def what_if_view(
 # --------------------------------------------------------------------------- #
 # Technical details (allowlisted, secret-free by construction)
 # --------------------------------------------------------------------------- #
+def rule_result_rows(analysis: AnalysisResult | None, lang: str) -> list[dict[str, Any]]:
+    """Canonical per-rule applicability rows for the Technical details view.
+
+    Presentation-only: every value is copied verbatim from the canonical
+    ``RuleApplicabilityResult`` / finding, so technical traceability (rule ids,
+    statuses, reason codes, missing attributes) is never lost behind the
+    customer-facing report. No value is translated.
+    """
+    if analysis is None or analysis.applicability is None:
+        return []
+    findings = {
+        finding.rule_id: finding
+        for finding in analysis.verified.compliance_information
+    }
+    rows: list[dict[str, Any]] = []
+    for result in analysis.applicability.rules:
+        finding = findings.get(result.rule_id)
+        rows.append(
+            {
+                "rule_id": result.rule_id,
+                "requirement": getattr(finding, "requirement", ""),
+                "authority": getattr(finding, "authority", ""),
+                "applicability_status": result.applicability_status.value,
+                "rule_status": (
+                    result.rule_status.value if result.rule_status is not None else ""
+                ),
+                "evidence_status": (
+                    result.evidence_status.value
+                    if result.evidence_status is not None
+                    else ""
+                ),
+                "reason_codes": ", ".join(code.value for code in result.reason_codes),
+                "missing_attribute_ids": ", ".join(result.missing_attribute_ids),
+            }
+        )
+    return rows
+
+
 def technical_view(
     analysis: AnalysisResult | None,
     meta: Mapping[str, Any] | None,

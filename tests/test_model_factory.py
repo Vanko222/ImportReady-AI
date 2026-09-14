@@ -198,7 +198,7 @@ def test_bedrock_unregistered_model_id_is_refused(monkeypatch: pytest.MonkeyPatc
 def test_deepseek_selection(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("MODEL_PROVIDER", "deepseek")
-    monkeypatch.setenv("MODEL_ID", "deepseek-flash")
+    monkeypatch.setenv("MODEL_ID", "deepseek-v4-flash")
     monkeypatch.setenv("API_KEY", "test-api-key")
     monkeypatch.setattr("strands.models.openai.OpenAIModel", _RecordingOpenAIModel)
 
@@ -208,16 +208,62 @@ def test_deepseek_selection(monkeypatch: pytest.MonkeyPatch) -> None:
         "base_url": "https://api.deepseek.com",
         "api_key": "test-api-key",
     }
-    assert model.kwargs["model_id"] == "deepseek-flash"
-    # The DeepSeek thinking/extra_body parameter is not supported by the API and
-    # must never be sent (it caused HTTP 400 Bad Request).
-    assert "params" not in model.kwargs
+    assert model.kwargs["model_id"] == "deepseek-v4-flash"
+    # DeepSeek V4 enables thinking mode by default; ImportReady sends the documented
+    # non-thinking Chat Completions option explicitly for THIS combination only, via
+    # the OpenAI SDK `extra_body` keyword the Strands model forwards from `params`.
+    assert model.kwargs["params"] == {
+        "extra_body": {"thinking": {"type": "disabled"}},
+    }
+
+
+def test_deepseek_v4_non_thinking_params_are_scoped_to_the_v4_combination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model-specific request option must never reach another model/provider."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("MODEL_PROVIDER", "deepseek")
+    monkeypatch.setenv("API_KEY", "test-api-key")
+    monkeypatch.setattr("strands.models.openai.OpenAIModel", _RecordingOpenAIModel)
+
+    # The legacy DeepSeek id declares no request params: the same `thinking` payload
+    # sent to that stale model returned HTTP 400, so its behaviour is preserved.
+    monkeypatch.setenv("MODEL_ID", "deepseek-flash")
+    legacy = build_model()
+    assert legacy.kwargs["model_id"] == "deepseek-flash"
+    assert "params" not in legacy.kwargs
+
+    # The V4 target sends exactly the documented non-thinking option.
+    monkeypatch.setenv("MODEL_ID", "deepseek-v4-flash")
+    v4 = build_model()
+    assert v4.kwargs["params"] == {"extra_body": {"thinking": {"type": "disabled"}}}
+    assert "reasoning" not in repr(v4.kwargs)
+
+    # Request inspection: the payload carries only the documented thinking switch and
+    # no legacy reasoning field, and the endpoint is the official DeepSeek one.
+    params = v4.kwargs["params"]
+    assert set(params) == {"extra_body"}
+    assert set(params["extra_body"]) == {"thinking"}
+    assert params["extra_body"]["thinking"] == {"type": "disabled"}
+    assert v4.kwargs["client_args"]["base_url"] == "https://api.deepseek.com"
+    assert v4.kwargs["model_id"] == "deepseek-v4-flash"
+
+    # No other registered combination declares request params, so the option cannot
+    # leak to Bedrock, to the offline mode, or to another DeepSeek model.
+    for descriptor in model_factory.PROVIDER_REGISTRY.values():
+        for combination in descriptor.combinations:
+            if (descriptor.provider_id, combination.model_id) == (
+                "deepseek",
+                "deepseek-v4-flash",
+            ):
+                continue
+            assert dict(combination.request_params) == {}, combination.model_id
 
 
 def test_deepseek_missing_api_key_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("MODEL_PROVIDER", "deepseek")
-    monkeypatch.setenv("MODEL_ID", "deepseek-flash")
+    monkeypatch.setenv("MODEL_ID", "deepseek-v4-flash")
     with pytest.raises(ValueError, match="API_KEY"):
         build_model()
     monkeypatch.setenv("API_KEY", "   ")
@@ -289,6 +335,7 @@ def test_unsupported_combination_is_refused_on_the_dev_path(
 def test_experimental_combination_is_allowed_on_the_dev_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The dev/CLI path accepts a registered EXPERIMENTAL combination (here the legacy id)."""
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("MODEL_PROVIDER", "deepseek")
     monkeypatch.setenv("MODEL_ID", "deepseek-flash")
@@ -330,13 +377,13 @@ def test_registry_integrity() -> None:
 
 
 def test_resolve_combination_requires_an_exact_pair() -> None:
-    assert resolve_combination("deepseek", "deepseek-flash") is COMBINATION_INDEX[
-        ("deepseek", "deepseek-flash")
+    assert resolve_combination("deepseek", "deepseek-v4-flash") is COMBINATION_INDEX[
+        ("deepseek", "deepseek-v4-flash")
     ]
     assert resolve_combination("deepseek", "deepseek-unknown") is None
-    assert resolve_combination("bedrock", "deepseek-flash") is None
+    assert resolve_combination("bedrock", "deepseek-v4-flash") is None
     assert resolve_combination("", "") is None
-    assert resolve_combination("DEEPSEEK", "deepseek-flash") is not None
+    assert resolve_combination("DEEPSEEK", "deepseek-v4-flash") is not None
 
 
 def test_verified_combinations_requires_verified_and_exposed(
@@ -376,23 +423,119 @@ def test_verified_combinations_requires_verified_and_exposed(
     assert _EXPERIMENTAL_MODEL_ID not in model_ids  # the flag cannot upgrade status
 
 
+# --------------------------------------------------------------------------- #
+# certified-combination promotion (human-approved, live certification PASS)
+# --------------------------------------------------------------------------- #
+def test_the_certified_combination_is_promoted_to_verified_and_exposed() -> None:
+    combination = resolve_combination("deepseek", "deepseek-v4-flash")
+    assert combination is not None
+    assert combination.compatibility_status is CompatibilityStatus.VERIFIED
+    assert combination.ui_exposed is True
+
+
+def test_the_certified_provider_configuration_is_preserved() -> None:
+    """Promotion changes status/exposure only: endpoint and non-thinking config stay certified."""
+    descriptor = PROVIDER_REGISTRY["deepseek"]
+    assert descriptor.base_url == "https://api.deepseek.com"
+    combination = resolve_combination("deepseek", "deepseek-v4-flash")
+    assert combination.model_id == "deepseek-v4-flash"
+    assert dict(combination.request_params) == {"extra_body": {"thinking": {"type": "disabled"}}}
+    # No sibling combination declares the V4-specific request parameters.
+    legacy = resolve_combination("deepseek", "deepseek-flash")
+    assert dict(legacy.request_params) == {}
+
+
+def test_verified_combinations_exposes_exactly_the_certified_pair() -> None:
+    entries = verified_combinations()
+    assert [(entry["provider_id"], entry["model_id"]) for entry in entries] == [
+        ("deepseek", "deepseek-v4-flash")
+    ]
+    entry = entries[0]
+    assert entry["display_name"] == "DeepSeek (OpenAI-compatible)"
+    # The consumer-facing view carries no endpoint and no free-form model id.
+    assert set(entry) == {"provider_id", "display_name", "model_id", "certification_ref"}
+
+
+def test_no_other_deepseek_model_inherits_the_promotion() -> None:
+    legacy = resolve_combination("deepseek", "deepseek-flash")
+    assert legacy.compatibility_status is CompatibilityStatus.EXPERIMENTAL
+    assert legacy.ui_exposed is False
+    unsupported = resolve_combination("deepseek", "deepseek-chat")
+    assert unsupported.compatibility_status is CompatibilityStatus.UNSUPPORTED
+    assert unsupported.ui_exposed is False
+    # A sibling V4 id is simply not registered, so it can never be selected.
+    assert resolve_combination("deepseek", "deepseek-v4-pro") is None
+    assert resolve_combination("deepseek", "deepseek-v4") is None
+    assert {entry["model_id"] for entry in verified_combinations()} == {"deepseek-v4-flash"}
+
+
+def test_arbitrary_provider_or_model_ids_remain_rejected() -> None:
+    for provider_id, model_id in (
+        ("deepseek", "deepseek-v4-pro"),
+        ("deepseek", "deepseek-v4-flash-2025"),
+        ("deepseek", "gpt-4o"),
+        ("acme", "deepseek-v4-flash"),
+        ("bedrock", "deepseek-v4-flash"),
+    ):
+        assert resolve_combination(provider_id, model_id) is None, (provider_id, model_id)
+
+
+def test_runtime_path_rejects_arbitrary_model_ids() -> None:
+    for model_id in ("deepseek-v4-pro", "deepseek-v4-flash-2025", "gpt-4o"):
+        with pytest.raises(ValueError, match="Unregistered model combination"):
+            build_model_from_runtime_config(
+                RuntimeProviderConfig(provider_id="deepseek", model_id=model_id, credential="sentinel")
+            )
+
+
+def test_runtime_path_builds_the_certified_pair_from_a_request_scoped_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The BYOK runtime path uses the promoted pair with an externally supplied credential only."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setattr("strands.models.openai.OpenAIModel", _RecordingOpenAIModel)
+
+    model = build_model_from_runtime_config(
+        RuntimeProviderConfig(
+            provider_id="deepseek",
+            model_id="deepseek-v4-flash",
+            credential="sentinel-credential",
+        )
+    )
+
+    assert model.kwargs["model_id"] == "deepseek-v4-flash"
+    assert model.kwargs["client_args"] == {
+        "base_url": "https://api.deepseek.com",
+        "api_key": "sentinel-credential",
+    }
+    # The certified non-thinking configuration travels with the exact combination.
+    assert model.kwargs["params"] == {"extra_body": {"thinking": {"type": "disabled"}}}
+    # The credential was passed in explicitly; it is never taken from os.environ by this path.
+    assert os.environ.get("API_KEY") is None
+
+
 def test_provider_status_report_exposes_metadata_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("API_KEY", "sk-sentinel-1234567890")
     report = provider_status_report()
+    assert "sk-sentinel-1234567890" not in repr(report)  # metadata only, never a credential
 
     by_id = {entry["provider_id"]: entry for entry in report}
     assert set(by_id) == set(PROVIDER_REGISTRY)
     assert by_id["deepseek"]["base_url"] == "https://api.deepseek.com"
     assert by_id["deepseek"]["credential_scope"] == ["API_KEY"]
 
-    statuses = {
-        combination["model_id"]: combination["compatibility_status"]
+    by_status = {
+        combination["model_id"]: combination
         for combination in by_id["deepseek"]["combinations"]
     }
-    assert statuses["deepseek-flash"] == "EXPERIMENTAL"
-    assert statuses["deepseek-chat"] == "UNSUPPORTED"
+    # Promoted after the human-approved live certification.
+    assert by_status["deepseek-v4-flash"]["compatibility_status"] == "VERIFIED"
+    assert by_status["deepseek-v4-flash"]["ui_exposed"] is True
+    assert by_status["deepseek-flash"]["compatibility_status"] == "EXPERIMENTAL"
+    assert by_status["deepseek-flash"]["ui_exposed"] is False  # legacy id, never consumer-certified
+    assert by_status["deepseek-chat"]["compatibility_status"] == "UNSUPPORTED"
 
     for entry in report:
         for combination in entry["combinations"]:
@@ -477,7 +620,7 @@ def test_builder_never_re_reads_model_id_from_the_environment(
 def test_callers_cannot_override_the_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("MODEL_PROVIDER", "deepseek")
-    monkeypatch.setenv("MODEL_ID", "deepseek-flash")
+    monkeypatch.setenv("MODEL_ID", "deepseek-v4-flash")
     monkeypatch.setenv("API_KEY", "test-api-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://attacker.invalid")
     monkeypatch.setenv("BASE_URL", "https://attacker.invalid")
@@ -587,6 +730,7 @@ def test_runtime_path_rejects_unregistered_combination() -> None:
 
 
 def test_runtime_path_rejects_experimental_combination() -> None:
+    """An EXPERIMENTAL combination (the legacy DeepSeek id) is never consumer-runtime eligible."""
     with pytest.raises(ValueError, match="Not available for consumer runtime use"):
         build_model_from_runtime_config(
             RuntimeProviderConfig(
@@ -746,11 +890,11 @@ def test_runtime_config_repr_excludes_the_credential() -> None:
     # conversion (logging, debugging, error reporting).
     secret = "sk-runtime-sentinel-do-not-leak-in-repr"
     config = RuntimeProviderConfig(
-        provider_id="deepseek", model_id="deepseek-flash", credential=secret
+        provider_id="deepseek", model_id="deepseek-v4-flash", credential=secret
     )
     assert secret not in repr(config)
     assert secret not in str(config)
-    assert "deepseek-flash" in repr(config)  # the repr stays useful
+    assert "deepseek-v4-flash" in repr(config)  # the repr stays useful
 
 
 def test_runtime_path_never_leaks_the_credential_in_errors() -> None:
@@ -758,7 +902,7 @@ def test_runtime_path_never_leaks_the_credential_in_errors() -> None:
     for config in (
         RuntimeProviderConfig(provider_id="deepseek", model_id="deepseek-flash", credential=secret),
         RuntimeProviderConfig(provider_id="deepseek", model_id="deepseek-unknown", credential=secret),
-        RuntimeProviderConfig(provider_id="acme", model_id="deepseek-flash", credential=secret),
+        RuntimeProviderConfig(provider_id="acme", model_id="deepseek-v4-flash", credential=secret),
     ):
         with pytest.raises(ValueError) as excinfo:
             build_model_from_runtime_config(config)

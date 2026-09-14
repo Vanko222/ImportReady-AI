@@ -35,7 +35,7 @@ from src.services.orchestrator import AgentRunOutcome
 
 SENTINEL = "sk-FAKE-TEST-KEY-ONLY"
 REASONING_WARNING = "reasoningContent is not supported in multi-turn conversations with the Chat Completions API."
-DEEPSEEK_ENV = {"MODEL_PROVIDER": "deepseek", "MODEL_ID": "deepseek-flash"}
+DEEPSEEK_ENV = {"MODEL_PROVIDER": "deepseek", "MODEL_ID": "deepseek-v4-flash"}
 
 
 def block_network(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -100,7 +100,7 @@ class StubModel(Model):
 
 def observe_case(**kwargs):
     """Run one real case through the adapter with a stub model (offline)."""
-    target = create_live_target("deepseek", "deepseek-flash", **kwargs)
+    target = create_live_target("deepseek", "deepseek-v4-flash", **kwargs)
     model = kwargs.pop("model", None) or StubModel()
     return target.run_case(model, CASES["A"], "small_consumer_electronics")
 
@@ -109,17 +109,24 @@ def observe_case(**kwargs):
 # 1 — live target factory
 # =========================================================================== #
 def test_create_live_target_returns_the_certification_target_contract() -> None:
-    target = create_live_target("deepseek", "deepseek-flash")
+    target = create_live_target("deepseek", "deepseek-v4-flash")
     assert isinstance(target, CertificationTarget)
-    assert (target.provider_id, target.model_id) == ("deepseek", "deepseek-flash")
+    assert (target.provider_id, target.model_id) == ("deepseek", "deepseek-v4-flash")
     for name in ("build_model", "minimal_request", "classify", "confirm", "run_case", "run_offline"):
         assert callable(getattr(target, name))
     assert "small_consumer_electronics" in target.allowed_values()
-    # The adapter supplies a value for the frozen P3.2A dataclass; the field set is unchanged.
+    # The adapter supplies a value for the P3.2A dataclass plus the non-secret target metadata
+    # that lets a record state truthfully whether a real live provider was exercised.
     assert tuple(CertificationTarget.__dataclass_fields__) == (
         "provider_id", "model_id", "allowed_values", "build_model", "minimal_request",
         "classify", "confirm", "run_case", "run_offline",
+        "target_kind", "endpoint_strategy", "base_url",
     )
+    # A real adapter (no injected model factory) declares a live provider target, and the
+    # endpoint comes from the registry - never from a caller and never with a credential.
+    assert target.target_kind == "real_live_provider_target"
+    assert target.base_url == "https://api.deepseek.com"
+    assert "api" in target.base_url and "key" not in target.endpoint_strategy.lower()
 
 
 @pytest.mark.parametrize("pair", [
@@ -136,15 +143,15 @@ def test_unregistered_or_unsupported_combinations_are_refused(pair) -> None:
 
 
 def test_require_combination_returns_the_registered_combination() -> None:
-    combination = require_combination("deepseek", "deepseek-flash")
-    assert combination.provider_id == "deepseek" and combination.model_id == "deepseek-flash"
-    assert combination.compatibility_status is model_factory.CompatibilityStatus.EXPERIMENTAL
+    combination = require_combination("deepseek", "deepseek-v4-flash")
+    assert combination.provider_id == "deepseek" and combination.model_id == "deepseek-v4-flash"
+    assert combination.compatibility_status is model_factory.CompatibilityStatus.VERIFIED
 
 
 def test_creation_constructs_no_model_and_makes_no_network_call(monkeypatch) -> None:
     block_network(monkeypatch)
     built: list = []
-    target = create_live_target("deepseek", "deepseek-flash",
+    target = create_live_target("deepseek", "deepseek-v4-flash",
                                 model_factory=lambda: built.append("model") or "fake-model")
     assert built == []            # construction is inert
     assert target.provider_id == "deepseek"
@@ -153,10 +160,11 @@ def test_creation_constructs_no_model_and_makes_no_network_call(monkeypatch) -> 
 def test_adapter_does_not_modify_the_registry(monkeypatch) -> None:
     block_network(monkeypatch)
     before = model_factory.provider_status_report()
-    create_live_target("deepseek", "deepseek-flash")
-    combination = model_factory.resolve_combination("deepseek", "deepseek-flash")
-    assert combination.compatibility_status is model_factory.CompatibilityStatus.EXPERIMENTAL
-    assert model_factory.verified_combinations() == []
+    create_live_target("deepseek", "deepseek-v4-flash")
+    combination = model_factory.resolve_combination("deepseek", "deepseek-v4-flash")
+    # The adapter is inert: the human-approved promoted status is unchanged by it.
+    assert combination.compatibility_status is model_factory.CompatibilityStatus.VERIFIED
+    assert combination.ui_exposed is True
     assert model_factory.provider_status_report() == before
 
 
@@ -166,7 +174,7 @@ def test_adapter_does_not_modify_the_registry(monkeypatch) -> None:
 def test_build_model_delegates_to_the_existing_factory_once(monkeypatch) -> None:
     block_network(monkeypatch)
     calls: list = []
-    target = create_live_target("deepseek", "deepseek-flash",
+    target = create_live_target("deepseek", "deepseek-v4-flash",
                                 model_factory=lambda: calls.append("build") or "fake-model")
     assert target.build_model() == "fake-model"
     assert calls == ["build"]
@@ -178,7 +186,7 @@ def test_build_model_default_path_is_offline_without_provider_configuration(monk
         monkeypatch.delenv(name, raising=False)
     # The default delegation is the existing env-driven factory: no provider configured -> None,
     # with no network access and no credential required.
-    assert create_live_target("deepseek", "deepseek-flash").build_model() is None
+    assert create_live_target("deepseek", "deepseek-v4-flash").build_model() is None
 
 
 def test_adapter_source_never_reads_the_environment_or_a_credential() -> None:
@@ -211,7 +219,7 @@ def test_minimal_request_extracts_text_with_str_only(monkeypatch) -> None:
             return _ResultWithoutText()
 
     monkeypatch.setattr("strands.Agent", FakeAgent)
-    target = create_live_target("deepseek", "deepseek-flash")
+    target = create_live_target("deepseek", "deepseek-v4-flash")
     assert target.minimal_request("model-stub") == "ok"
     assert calls[0][1]["callback_handler"] is None
     assert calls[0][1]["model"] == "model-stub"
@@ -228,7 +236,7 @@ def test_minimal_request_fails_closed_on_a_secret_leak(monkeypatch, capsys) -> N
             return _ResultWithoutText()
 
     monkeypatch.setattr("strands.Agent", LeakyAgent)
-    target = create_live_target("deepseek", "deepseek-flash", literals=(SENTINEL,))
+    target = create_live_target("deepseek", "deepseek-v4-flash", literals=(SENTINEL,))
     with pytest.raises(cert.SecretSafetyError):
         target.minimal_request("model-stub")
     assert SENTINEL not in capsys.readouterr().out
@@ -240,7 +248,7 @@ def test_minimal_request_fails_closed_on_a_secret_leak(monkeypatch, capsys) -> N
 def test_adapter_observes_tool_use_tool_result_and_continuation(monkeypatch) -> None:
     block_http(monkeypatch)
     model = StubModel()
-    target = create_live_target("deepseek", "deepseek-flash")
+    target = create_live_target("deepseek", "deepseek-v4-flash")
     observation = target.run_case(model, CASES["A"], "small_consumer_electronics")
 
     assert observation.tool_use_events == ("analyze_product",)
@@ -296,9 +304,63 @@ def test_observation_mapping_surfaces_every_required_field() -> None:
     assert mapped.analysis_result is None
 
 
+def test_observation_mapping_guards_a_lifecycle_promotion_before_gate8() -> None:
+    """Live Case B regression: the adapter's guard neutralises non-current lifecycle wording.
+
+    The canonical result is read-only input; the guard rewrites only the advisory prose, records the
+    chain, and Gate 8 then reads safe text.
+    """
+
+    @dataclass
+    class _Run:
+        result: dict | None
+        agent_runtime: dict
+
+    canonical = {
+        "classification": {"category": "small_consumer_electronics"},
+        "review": {"status": "REVIEW_REQUIRED", "triggers": [], "reviewer_actions": []},
+        "applicability": {"rules": [
+            {"rule_id": "R-ELEC-002", "applicability_status": "APPLICABLE"},
+            {"rule_id": "R-ELEC-018", "applicability_status": "REVIEW_REQUIRED"},
+            {"rule_id": "R-ELEC-019", "applicability_status": "REVIEW_REQUIRED"},
+        ]},
+        "verified": {"compliance_information": [
+            {"rule_id": "R-ELEC-002", "rule_status": "EFFECTIVE", "evidence_status": "VERIFIED"},
+            {"rule_id": "R-ELEC-018", "rule_status": "WATCHLIST", "evidence_status": "VERIFIED"},
+            {"rule_id": "R-ELEC-019", "rule_status": "PROPOSED", "evidence_status": "VERIFIED"},
+        ]},
+        "agent_suggestions": [{"kind": "agent_explanation", "text": (
+            "R-ELEC-002 is required for this transmitter. "
+            "R-ELEC-019 is currently required and the importer must comply now. "
+            "Human review is required.")}],
+    }
+    before = json.dumps(canonical, sort_keys=True)
+    proxy = cert.RecordingModelProxy(StubModel())
+    proxy.requests = 2
+    proxy.tool_use_events = ["analyze_product"]
+    proxy.tool_result_incorporated = True
+    observation = observation_from_run(
+        _Run(result=canonical, agent_runtime={"status": "SUCCEEDED", "stop_reason": "end_turn"}),
+        proxy, case=CASES["B"],
+    )
+    # The canonical result is untouched and stays the gate-10 comparison input.
+    assert json.dumps(canonical, sort_keys=True) == before
+    assert observation.analysis_result is canonical
+    # The advisory prose was guarded; the EFFECTIVE rule's explanation and the review step survive.
+    assert "R-ELEC-019 is PROPOSED" in observation.final_text
+    assert "not confirmed as a current applicable obligation for this product" in observation.final_text
+    assert "currently required" not in observation.final_text.lower()
+    assert "R-ELEC-002 is required for this transmitter." in observation.final_text
+    assert "Human review is required." in observation.final_text
+    # The chain is recorded for the report, and Gate 8 now passes.
+    assert observation.response_guard
+    assert "canonical result unchanged" in observation.response_guard[0]
+    assert cert.run_gate8(CASES["B"], observation).status is cert.GateStatus.PASS
+
+
 def test_reasoning_warning_is_observed_and_classified(monkeypatch) -> None:
     block_http(monkeypatch)
-    target = create_live_target("deepseek", "deepseek-flash")
+    target = create_live_target("deepseek", "deepseek-v4-flash")
     clean = target.run_case(StubModel(), CASES["A"], "small_consumer_electronics")
     assert clean.warning_class == "NOT_OBSERVED"
     assert not any("reasoningcontent" in w.lower() for w in clean.warnings)
@@ -307,7 +369,7 @@ def test_reasoning_warning_is_observed_and_classified(monkeypatch) -> None:
     assert warned.warning_class == "A"  # observed but the run completed normally
     assert any("reasoningContent is not supported" in w for w in warned.warnings)
 
-    forced = create_live_target("deepseek", "deepseek-flash", warning_class_override="D")
+    forced = create_live_target("deepseek", "deepseek-v4-flash", warning_class_override="D")
     assert forced.run_case(StubModel(warn=True), CASES["A"], "small_consumer_electronics").warning_class == "D"
 
 
@@ -321,7 +383,7 @@ def test_classify_warning_policy(lines, completed, expected) -> None:
     assert classify_warning(lines, completed_normally=completed) == expected
     assert classify_warning(lines, completed_normally=completed, override="B") == "B"
     with pytest.raises(ValueError):
-        create_live_target("deepseek", "deepseek-flash", warning_class_override="Z")
+        create_live_target("deepseek", "deepseek-v4-flash", warning_class_override="Z")
 
 
 # =========================================================================== #
@@ -334,7 +396,7 @@ def test_adapter_reuses_the_p3_2a_output_capture_boundary() -> None:
 
 def test_case_run_secret_leak_fails_closed_and_stays_blocked(monkeypatch, capsys) -> None:
     block_http(monkeypatch)
-    target = create_live_target("deepseek", "deepseek-flash", literals=(SENTINEL,))
+    target = create_live_target("deepseek", "deepseek-v4-flash", literals=(SENTINEL,))
     observation = target.run_case(StubModel(leak=True), CASES["A"], "small_consumer_electronics")
 
     assert observation.capture_failure is cert.FailureCategory.SECRET_SAFETY_FAILURE
@@ -345,7 +407,7 @@ def test_case_run_secret_leak_fails_closed_and_stays_blocked(monkeypatch, capsys
 
 def test_gates_consume_the_adapter_fail_closed_signal(monkeypatch) -> None:
     block_http(monkeypatch)
-    target = create_live_target("deepseek", "deepseek-flash", literals=(SENTINEL,))
+    target = create_live_target("deepseek", "deepseek-v4-flash", literals=(SENTINEL,))
     observation = target.run_case(StubModel(leak=True), CASES["A"], "small_consumer_electronics")
     for gate, result in (
         (2, cert.run_gate2(CASES["A"], observation, list(target.allowed_values()))),
@@ -362,7 +424,7 @@ def test_gates_consume_the_adapter_fail_closed_signal(monkeypatch) -> None:
 # =========================================================================== #
 def test_certification_core_surface_is_unchanged() -> None:
     assert cert.ALL_GATES == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
-    assert cert.CASE_IDS == ("A", "B", "C")
+    assert cert.CASE_IDS == ("A", "B", "C", "D")
     for gate in range(1, 11):
         assert callable(getattr(cert, f"run_gate{gate}"))
     assert not hasattr(cert, "ProductionTarget")
@@ -418,11 +480,11 @@ def test_probe_preflight_refuses_before_any_model_or_network(monkeypatch) -> Non
     built: list = []
     factory = lambda: built.append("model") or PlainStubModel()  # noqa: E731
 
-    assert probe_preflight("deepseek", "deepseek-flash", DEEPSEEK_ENV).code == "OK"
-    assert probe_preflight("deepseek", "deepseek-flash",
-                           {"MODEL_PROVIDER": "bedrock", "MODEL_ID": "deepseek-flash"}).code == "CONFIGURATION_MISMATCH"
-    assert probe_preflight("deepseek", "deepseek-flash", {}).code == "CONFIGURATION_MISMATCH"
-    assert probe_preflight("deepseek", "deepseek-flash",
+    assert probe_preflight("deepseek", "deepseek-v4-flash", DEEPSEEK_ENV).code == "OK"
+    assert probe_preflight("deepseek", "deepseek-v4-flash",
+                           {"MODEL_PROVIDER": "bedrock", "MODEL_ID": "deepseek-v4-flash"}).code == "CONFIGURATION_MISMATCH"
+    assert probe_preflight("deepseek", "deepseek-v4-flash", {}).code == "CONFIGURATION_MISMATCH"
+    assert probe_preflight("deepseek", "deepseek-v4-flash",
                            {"MODEL_PROVIDER": "deepseek", "MODEL_ID": "other"}).code == "CONFIGURATION_MISMATCH"
     assert probe_preflight("deepseek", "not-registered",
                            {"MODEL_PROVIDER": "deepseek", "MODEL_ID": "not-registered"}).code == "MODEL_NOT_REGISTERED"
@@ -438,10 +500,10 @@ def test_probe_preflight_refuses_before_any_model_or_network(monkeypatch) -> Non
 def test_missing_credential_fails_safely_without_network(monkeypatch) -> None:
     block_network(monkeypatch)
     monkeypatch.setenv("MODEL_PROVIDER", "deepseek")
-    monkeypatch.setenv("MODEL_ID", "deepseek-flash")
+    monkeypatch.setenv("MODEL_ID", "deepseek-v4-flash")
     monkeypatch.delenv("API_KEY", raising=False)   # credential absent
 
-    result = live_probe("deepseek", "deepseek-flash", DEEPSEEK_ENV)
+    result = live_probe("deepseek", "deepseek-v4-flash", DEEPSEEK_ENV)
 
     assert result.ok is False
     assert result.code in cert.FailureCategory.__members__      # a canonical taxonomy name
@@ -458,7 +520,7 @@ def test_unconfigured_provider_fails_safely(monkeypatch) -> None:
     block_network(monkeypatch)
     for name in ("MODEL_PROVIDER", "MODEL_ID", "API_KEY"):
         monkeypatch.delenv(name, raising=False)
-    result = live_probe("deepseek", "deepseek-flash", DEEPSEEK_ENV)
+    result = live_probe("deepseek", "deepseek-v4-flash", DEEPSEEK_ENV)
     assert result.ok is False and result.code == "MODEL_UNAVAILABLE"
     assert result.response_text == "" and result.latency_ms == 0
 
@@ -466,7 +528,7 @@ def test_unconfigured_provider_fails_safely(monkeypatch) -> None:
 def test_successful_probe_against_a_fake_provider(monkeypatch) -> None:
     block_http(monkeypatch)
     model = PlainStubModel()
-    result = live_probe("deepseek", "deepseek-flash", DEEPSEEK_ENV, model_factory=lambda: model)
+    result = live_probe("deepseek", "deepseek-v4-flash", DEEPSEEK_ENV, model_factory=lambda: model)
 
     assert result.ok is True and result.code == "OK"
     # Phase C observation: str(AgentResult) carries a trailing newline for this stub response.
@@ -484,7 +546,7 @@ def test_successful_probe_against_a_fake_provider(monkeypatch) -> None:
 def test_provider_error_is_sanitized(monkeypatch, capsys) -> None:
     block_http(monkeypatch)
     model = FailingStubModel(f"401 unauthorized for key {SENTINEL}")
-    result = live_probe("deepseek", "deepseek-flash", DEEPSEEK_ENV, model_factory=lambda: model,
+    result = live_probe("deepseek", "deepseek-v4-flash", DEEPSEEK_ENV, model_factory=lambda: model,
                         literals=(SENTINEL,))
 
     assert result.ok is False and result.code == "AUTH_FAILURE"
@@ -498,7 +560,7 @@ def test_provider_error_is_sanitized(monkeypatch, capsys) -> None:
 def test_no_secret_reaches_the_probe_output(monkeypatch, capsys) -> None:
     block_http(monkeypatch)
     model = PlainStubModel(leak=True)
-    result = live_probe("deepseek", "deepseek-flash", DEEPSEEK_ENV, model_factory=lambda: model,
+    result = live_probe("deepseek", "deepseek-v4-flash", DEEPSEEK_ENV, model_factory=lambda: model,
                         literals=(SENTINEL,))
 
     assert result.ok is False and result.code == "SECRET_SAFETY_FAILURE"
@@ -514,15 +576,15 @@ def test_live_probe_cli_path_is_manual_and_sanitized(monkeypatch, capsys) -> Non
     from src.certification.__main__ import main
 
     monkeypatch.setenv("MODEL_PROVIDER", "deepseek")
-    monkeypatch.setenv("MODEL_ID", "deepseek-flash")
+    monkeypatch.setenv("MODEL_ID", "deepseek-v4-flash")
     monkeypatch.delenv("API_KEY", raising=False)
-    exit_code = main(["--provider", "deepseek", "--model", "deepseek-flash", "--live-probe"])
+    exit_code = main(["--provider", "deepseek", "--model", "deepseek-v4-flash", "--live-probe"])
     output = capsys.readouterr().out
     assert exit_code == 1
     assert "FAILED" in output and "API_KEY" in output and SENTINEL not in output
     # the pre-existing offline behaviour is untouched
-    assert main(["--provider", "deepseek", "--model", "deepseek-flash"]) == 0
-    assert main(["--provider", "deepseek", "--model", "deepseek-flash", "--live"]) == 2
+    assert main(["--provider", "deepseek", "--model", "deepseek-v4-flash"]) == 0
+    assert main(["--provider", "deepseek", "--model", "deepseek-v4-flash", "--live"]) == 2
 
 
 # =========================================================================== #
@@ -549,14 +611,14 @@ def test_bridge_calls_the_existing_runner_exactly_once(monkeypatch, tmp_path) ->
     limits = cert.RunLimits(max_requests_total=2, max_requests_per_case=1, agent_turns=1,
                             wall_clock_seconds=30, case_wall_clock_seconds=10)
     record = run_guarded_live_certification(
-        "deepseek", "deepseek-flash", cases=("A",), limits=limits, environ=DEEPSEEK_ENV,
+        "deepseek", "deepseek-v4-flash", cases=("A",), limits=limits, environ=DEEPSEEK_ENV,
         repo_root=tmp_path, evidence_out=tmp_path / "evidence" / "run.txt",
         build_target=fake_make_target, runner=fake_runner)
 
     assert record is fake_record
     assert len(calls) == 2
     kind, provider_id, model_id, target_kwargs = calls[0]
-    assert kind == "target" and (provider_id, model_id) == ("deepseek", "deepseek-flash")
+    assert kind == "target" and (provider_id, model_id) == ("deepseek", "deepseek-v4-flash")
     assert target_kwargs == {"literals": ()}
     assert calls[1][0] == "runner"
     assert calls[1][1] == (sentinel_target,)
@@ -575,11 +637,11 @@ def test_bridge_calls_the_existing_runner_exactly_once(monkeypatch, tmp_path) ->
 def test_bridge_defaults_to_the_real_adapter_for_the_exact_registered_combination() -> None:
     """With no injection the bridge builds the real adapter for the resolved combination (no request)."""
     seen: list = []
-    run_guarded_live_certification("deepseek", "deepseek-flash",
+    run_guarded_live_certification("deepseek", "deepseek-v4-flash",
                                    runner=lambda target, **kwargs: seen.append(target))
     assert len(seen) == 1
     target = seen[0]
-    assert (target.provider_id, target.model_id) == ("deepseek", "deepseek-flash")
+    assert (target.provider_id, target.model_id) == ("deepseek", "deepseek-v4-flash")
     for hook in ("build_model", "minimal_request", "classify", "confirm", "run_case", "run_offline"):
         assert callable(getattr(target, hook))
 
@@ -602,7 +664,7 @@ def test_bridge_uses_the_existing_failure_taxonomy(monkeypatch, tmp_path) -> Non
     repo_root, evidence = tmp_path / "repo", tmp_path / "evidence" / "run.txt"
     model = FailingStubModel("401 unauthorized for key " + SENTINEL)
     record = run_guarded_live_certification(
-        "deepseek", "deepseek-flash", cases=("A",), environ=DEEPSEEK_ENV, repo_root=repo_root,
+        "deepseek", "deepseek-v4-flash", cases=("A",), environ=DEEPSEEK_ENV, repo_root=repo_root,
         evidence_out=evidence,
         build_target=lambda provider_id, model_id, **kwargs: create_live_target(
             provider_id, model_id, literals=kwargs.get("literals", ()),

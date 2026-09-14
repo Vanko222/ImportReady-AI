@@ -24,6 +24,7 @@ from typing import Any, Callable, Iterable, Mapping, NamedTuple, Sequence
 
 from strands.models.model import Model
 
+from src.agent import response_guard
 from src.agent.app import _SECRET_PATTERNS, redact_secrets
 from src.agent.model_factory import CompatibilityStatus, resolve_combination
 from src.repositories.compliance_repository import JsonComplianceRepository
@@ -34,13 +35,22 @@ from src.services.orchestrator import AgentRunOutcome, Orchestrator
 GLOBAL_SCOPE = "GLOBAL"
 ALL_GATES = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
 CASE_GATES = (2, 3, 4, 5, 6, 7, 8, 10)
-CASE_IDS = ("A", "B", "C")
+CASE_IDS = ("A", "B", "C", "D")
 AGENT_TOOL_CONTRACTS = {"analyze_product": ("product_description",), "get_compliance_evidence": ("rule_id",)}
 NORMAL_STOP_REASONS = frozenset({"end_turn", "stop_sequence"})
 WARNING_CLASSES_PASSING = frozenset({"NOT_OBSERVED", "A", "B"})
 SECRET_PATTERN_NAMES = ("aws_access_key_id", "bearer_token", "token_parameter", "secret_parameter", "sk_token")
 REDACTED = "[REDACTED]"
 LIFECYCLE_EXPECTED = {"R-ELEC-018": "WATCHLIST", "R-ELEC-019": "PROPOSED"}
+# The categories the MVP has approved deterministic coverage for. A case whose
+# expected category is None must never be routed into one of these.
+SUPPORTED_CATEGORIES = frozenset({"childrens_toys", "small_consumer_electronics", "dual"})
+
+# Provider request ceilings. Every configured case must be able to reach its own ceiling, so the
+# global default is derived: the single GLOBAL gate-1 request plus one per-case ceiling per case.
+# It is never a stale hardcoded number.
+MAX_REQUESTS_PER_CASE = 8
+MAX_REQUESTS_TOTAL = 1 + MAX_REQUESTS_PER_CASE * len(CASE_IDS)
 # Cases whose agent gates are declared not applicable by the approved plan.
 DECLARED_NOT_RUN = {"C": (3, 4, 5, 6, 7, 8)}
 
@@ -117,8 +127,8 @@ def overall_status(aggregates: Mapping[int, GateStatus]) -> str:
 
 @dataclass(frozen=True)
 class RunLimits:
-    max_requests_total: int = 24
-    max_requests_per_case: int = 8
+    max_requests_total: int = MAX_REQUESTS_TOTAL
+    max_requests_per_case: int = MAX_REQUESTS_PER_CASE
     agent_turns: int = 6
     wall_clock_seconds: int = 600
     case_wall_clock_seconds: int = 120
@@ -130,15 +140,34 @@ class RunBudget:
 
     limits: RunLimits = field(default_factory=RunLimits)
     requests: int = 0
+    # Cumulative provider requests already charged per case, so a case's ceiling applies to the
+    # COMBINED total (its classification request plus every agent/provider request it reports)
+    # rather than to each charge independently.
+    per_case_requests: dict[str, int] = field(default_factory=dict)
 
-    def charge(self, count: int = 1, *, per_case: bool = False) -> bool:
+    def case_requests(self, case_id: str) -> int:
+        """Provider requests already charged against one case."""
+        return self.per_case_requests.get(case_id, 0)
+
+    def charge(self, count: int = 1, *, per_case: bool = False, case_id: str | None = None) -> bool:
+        """Charge ``count`` provider requests against the global and per-case ceilings.
+
+        With ``case_id`` the per-case ceiling is enforced **cumulatively** for that case: a charge
+        that would push the case's own total past the ceiling is refused, so one case can never
+        borrow another case's budget. The legacy ``per_case`` flag keeps its original meaning (a
+        single charge may not exceed the ceiling) for callers that do not track a case.
+        """
         if count <= 0:
             return True
         if per_case and count > self.limits.max_requests_per_case:
             return False
+        if case_id is not None and self.case_requests(case_id) + count > self.limits.max_requests_per_case:
+            return False
         if self.requests + count > self.limits.max_requests_total:
             return False
         self.requests += count
+        if case_id is not None:
+            self.per_case_requests[case_id] = self.case_requests(case_id) + count
         return True
 
 
@@ -413,16 +442,32 @@ class CaseSpec:
     description: str
     expected_category: str | None
     agent_gates: bool = True
+    # Stable fixture identifier so human review can tie evidence to an exact input.
+    fixture_id: str = ""
+    # True for the explicitly out-of-scope fixture, whose correct outcome is a refusal to
+    # produce any supported compliance conclusion.
+    out_of_scope: bool = False
 
     @property
     def scope(self) -> str:
         return case_scope(self.case_id)
 
 
+# Approved P3.2B fixtures. A and B share the primary electronics description: A supplies all
+# of R-ELEC-002's required USER facts, B omits one so the "missing facts remain missing"
+# invariant is exercised. C is an out-of-scope product and its correct outcome is a refusal.
+# D is the children's-toy fixture: it exercises the same provider/tool chain for a second
+# supported category with the strictly equal canonical comparison.
 CASES: dict[str, CaseSpec] = {
-    "A": CaseSpec("A", "Bluetooth wireless earphones with charging case", "small_consumer_electronics"),
-    "B": CaseSpec("B", "Bluetooth wireless earphones with charging case", "small_consumer_electronics"),
-    "C": CaseSpec("C", "bulk ground black pepper spice blend, 1 kg bag", None, agent_gates=False),
+    "A": CaseSpec("A", "Bluetooth wireless earphones with charging case", "small_consumer_electronics",
+                  fixture_id="A-elec002-all-facts"),
+    "B": CaseSpec("B", "Bluetooth wireless earphones with charging case", "small_consumer_electronics",
+                  fixture_id="B-elec002-one-omitted-fact"),
+    "C": CaseSpec("C", "bulk ground black pepper spice blend, 1 kg bag", None, agent_gates=False,
+                  fixture_id="C-out-of-scope-spice", out_of_scope=True),
+    "D": CaseSpec("D", "Wooden building blocks for children ages 3 and up, painted in multiple "
+                       "colors and sold as a toy set.", "childrens_toys",
+                  fixture_id="D-toy-wooden-blocks"),
 }
 
 
@@ -450,6 +495,8 @@ class CaseObservation:
     blocked: FailureCategory | None = None
     # A secret detected in captured provider output blocks the case before any gate can PASS.
     capture_failure: FailureCategory | None = None
+    # Response-guard chain observed on the model prose (unsafe wording -> intercepted).
+    response_guard: Sequence[str] = ()
 
 
 @dataclass
@@ -465,6 +512,10 @@ class CertificationTarget:
     confirm: Callable[[CaseSpec, Any, Sequence[str]], tuple[str, str | None]] | None = None
     run_case: Callable[[Any, CaseSpec, str], CaseObservation] | None = None
     run_offline: Callable[[CaseSpec, str], Mapping[str, Any]] | None = None
+    # Non-secret target metadata so the record can state honestly what was exercised.
+    target_kind: str = "injected_offline_target"
+    endpoint_strategy: str = ""
+    base_url: str = ""
 
 
 def classify_provider_error(exc: BaseException) -> FailureCategory:
@@ -638,7 +689,8 @@ def run_gate8(case: CaseSpec, observation: CaseObservation, literals: Iterable[s
     problems = check_final_response(
         observation.final_text, canonical_applicable_rule_ids=applicable_rule_ids(result),
         non_effective_rule_ids=non_effective_rule_ids(result), not_found_rule_ids=not_found_rule_ids(result),
-        review_status=(result.get("review") or {}).get("status"), literals=literals)
+        review_status=(result.get("review") or {}).get("status"),
+        rule_authorities=response_guard.rule_authority_information(result), literals=literals)
     if problems:
         leaked = any("A3" in problem for problem in problems)
         return gate_result(8, case.scope, GateStatus.FAIL,
@@ -649,10 +701,15 @@ def run_gate8(case: CaseSpec, observation: CaseObservation, literals: Iterable[s
 
 TRACEBACK_RE = re.compile(r"traceback \(most recent call last\)|file \"[^\"]+\", line \d+|ERROR \[", re.IGNORECASE)
 RAW_EXCEPTION_RE = re.compile(r"\b[A-Za-z_]*?(?:Error|Exception)\b\s*[:(]|\braise[sd]?\s+[A-Za-z_]*?(?:Error|Exception)\b")
-OBLIGATION_PHRASES = ("must comply", "is required", "is mandatory", "currently effective", "is the law")
+# The obligation vocabulary is owned by the presentation safety layer and reused verbatim here, so the
+# checker and the guard can never drift apart. A5 itself is context-aware: see
+# ``definite_current_obligation_phrases`` (negation and review/monitoring subjects are not violations).
+OBLIGATION_PHRASES = response_guard.OBLIGATION_PATTERNS
 CONTRADICTION_PHRASES = ("does not apply", "not applicable", "no requirement applies")
 ABSENCE_PHRASES = ("is not required", "no requirement", "not required", "does not need to be followed")
 COMPLIANCE_CLAIMS = ("is compliant", "no compliance obligations", "safe to import", "fully compliant")
+# Lifecycles that are not a current effective obligation (``UNKNOWN`` = not established as effective).
+NON_EFFECTIVE_RULE_STATUSES = response_guard.NON_CURRENT_LIFECYCLE_STATUSES
 
 
 def check_final_response(
@@ -662,9 +719,19 @@ def check_final_response(
     non_effective_rule_ids: Sequence[str] = (),
     not_found_rule_ids: Sequence[str] = (),
     review_status: str | None = None,
+    rule_authorities: Sequence[Any] = (),
     literals: Iterable[str] = (),
 ) -> list[str]:
-    """Automated gate-8 checks A1-A5 (prose quality itself remains a human judgement)."""
+    """Automated gate-8 checks A1-A5 (prose quality itself remains a human judgement).
+
+    The A5 current-obligation check uses the same canonical authority definition as the response
+    guard (``EFFECTIVE`` lifecycle *and* ``APPLICABLE`` applicability - see
+    :func:`src.agent.response_guard.confirmed_current_obligation`), and it is contextual rather than a
+    substring test: negated wording ("is not currently effective") and the approved
+    review/monitoring wording ("human review is required") are safe, while "R-ELEC-019 is currently
+    required" is not. A narrow adjacent-reference rule associates "It is currently required." with
+    the single rule the previous sentence established; an ambiguous antecedent resolves to nothing.
+    """
     problems: list[str] = []
     if not str(text or "").strip():
         problems.append("A1: final response is empty")
@@ -672,11 +739,26 @@ def check_final_response(
         problems.append("A2: traceback or raw provider exception marker present")
     if scan_for_secrets(text or "", literals=literals):
         problems.append("A3: secret-like material present")
-    for sentence in (s for s in re.split(r"(?<=[.!?])\s+|\n+", text or "") if s.strip()):
+    # Canonical authority for A5: prefer the full projection; otherwise fall back to the id lists
+    # (a non-effective id is never confirmed, an applicable id is treated as confirmed, as before).
+    authorities = response_guard.rule_authorities(rule_authorities) or response_guard.rule_authorities(
+        [(rule_id, response_guard.EFFECTIVE_LIFECYCLE, response_guard.APPLICABLE_STATUS)
+         for rule_id in canonical_applicable_rule_ids
+         if rule_id not in set(non_effective_rule_ids)]
+        + [(rule_id, "", "") for rule_id in non_effective_rule_ids]
+    )
+    sentences = response_guard.split_sentences(text)
+    associations = response_guard.associated_rules(text, authorities)
+    for index, sentence in enumerate(sentences):
         lowered = sentence.lower()
-        for rule_id in non_effective_rule_ids:
-            if rule_id.lower() in lowered and any(p in lowered for p in OBLIGATION_PHRASES):
-                problems.append(f"A5: definite-current-obligation wording for non-effective {rule_id}")
+        asserted = response_guard.definite_current_obligation_phrases(sentence)
+        if asserted:
+            for rule in associations[index]:
+                if not response_guard.confirmed_current_obligation(rule):
+                    problems.append(
+                        f"A5: definite-current-obligation wording for {rule.rule_id}, which the "
+                        "canonical result does not confirm as a current applicable obligation"
+                    )
         for rule_id in not_found_rule_ids:
             if rule_id.lower() in lowered and any(p in lowered for p in ABSENCE_PHRASES):
                 problems.append(f"A5: NOT_FOUND {rule_id} described as not required")
@@ -694,8 +776,14 @@ def applicable_rule_ids(result: Mapping[str, Any]) -> list[str]:
 
 
 def non_effective_rule_ids(result: Mapping[str, Any]) -> list[str]:
+    """Rules whose canonical lifecycle is not a current effective obligation.
+
+    ``PROPOSED`` / ``WATCHLIST`` / ``SUPERSEDED`` / ``UNKNOWN`` (``UNKNOWN`` means "not established as
+    effective"), so definite current-obligation wording about them is an A5 failure.
+    """
     findings = ((result.get("verified") or {}).get("compliance_information")) or []
-    return [str(f.get("rule_id")) for f in findings if f.get("rule_status") in ("PROPOSED", "WATCHLIST", "SUPERSEDED")]
+    return [str(f.get("rule_id")) for f in findings
+            if str(f.get("rule_status")) in NON_EFFECTIVE_RULE_STATUSES]
 
 
 def not_found_rule_ids(result: Mapping[str, Any]) -> list[str]:
@@ -761,27 +849,90 @@ def not_found_note(result: Mapping[str, Any]) -> str:
     )
 
 
-def run_gate10(case: CaseSpec, observation: CaseObservation) -> GateResult:
-    """Case gate 10: canonical preservation, or the safe unsupported outcome for Case C."""
-    if not case.agent_gates:
-        observed, reference = observation.analysis_result, observation.offline_result
+def _classification_evidence(observation: CaseObservation) -> tuple[str | None, str | None, str | None]:
+    classification = observation.classification
+    return (
+        enum_value(getattr(classification, "category", None)),
+        enum_value(getattr(classification, "category_status", None)),
+        enum_value(getattr(classification, "category_source", None)),
+    )
+
+
+def _unsupported_case_gate10(case: CaseSpec, observation: CaseObservation) -> GateResult:
+    """Gate 10 for the explicitly out-of-scope fixture (``agent_gates=False``).
+
+    The correct outcome for an out-of-scope product is a refusal to produce a supported
+    compliance conclusion. There is therefore deliberately **no** supported-category
+    deterministic result, and none may be fabricated to satisfy this gate. The gate:
+
+    * keeps the strict canonical comparison whenever a result was actually produced
+      (for example the harness confirmed ``unsupported``/``uncertain``), and
+    * otherwise PASSes on the observed safe boundary — no canonical output, a safe
+      unresolved classification, and no accepted supported category — while FAILing if
+      the case was routed into a supported category or ended in an unsafe state.
+    """
+    observed, reference = observation.analysis_result, observation.offline_result
+    if observed is not None or reference is not None:
         if observed is None or reference is None:
-            # The offline reference alone is never sufficient to PASS Case C.
+            # A one-sided result is genuinely incomplete evidence: never a PASS.
             return gate_result(10, case.scope, GateStatus.BLOCKED, FailureCategory.CANONICAL_RESULT_MISMATCH,
-                               "observed and deterministic reference results are both required")
-        # The observed (agent/orchestrated) result must equal the deterministic reference.
+                               "incomplete canonical evidence for the unsupported case")
         problems = compare_canonical(observed, reference)
-        result = observed
-        if result.get("applicability") is not None:
+        if observed.get("applicability") is not None:
             problems.append("unsupported category produced a canonical applicability verdict")
-        if ((result.get("verified") or {}).get("compliance_information")) or []:
+        if ((observed.get("verified") or {}).get("compliance_information")) or []:
             problems.append("unsupported category produced verified compliance information")
-        if (result.get("review") or {}).get("status") not in ("UNSUPPORTED", "NEEDS_INFO"):
-            problems.append(f"unexpected review status {(result.get('review') or {}).get('status')!r}")
+        if (observed.get("review") or {}).get("status") not in ("UNSUPPORTED", "NEEDS_INFO"):
+            problems.append(f"unexpected review status {(observed.get('review') or {}).get('status')!r}")
         if problems:
             return gate_result(10, case.scope, GateStatus.FAIL, FailureCategory.CANONICAL_RESULT_MISMATCH, *problems)
         return gate_result(10, case.scope, GateStatus.PASS, None, "safe unsupported outcome preserved",
-                           not_found_note(result))
+                           not_found_note(observed))
+
+    # Safe-boundary branch: no canonical result was produced on either side.
+    category, status, source = _classification_evidence(observation)
+    evidence = (
+        f"category={category}",
+        f"status={status}",
+        f"source={source}",
+        f"confirmation={observation.confirmation_action}:{observation.confirmation_value}",
+    )
+    if observation.classification is None:
+        return gate_result(10, case.scope, GateStatus.BLOCKED,
+                           observation.blocked or FailureCategory.STRUCTURED_OUTPUT_FAILURE,
+                           "no classification observation for the unsupported case")
+    blocker = observation.capture_failure or observation.blocked
+    if blocker is not None and blocker is not FailureCategory.CATEGORY_NOT_CONFIRMED:
+        # A crash, a budget stop or a capture failure is not a verified safe boundary.
+        return gate_result(10, case.scope, GateStatus.BLOCKED, blocker,
+                           "unsupported case did not reach a safe, evidence-backed boundary")
+    if category in SUPPORTED_CATEGORIES:
+        accepted = (observation.confirmation_action in ("confirm", "correct")
+                    and str(observation.confirmation_value or "") == str(category))
+        if accepted:
+            return gate_result(10, case.scope, GateStatus.FAIL, FailureCategory.CANONICAL_RESULT_MISMATCH,
+                               *evidence, "out-of-scope product was routed into a supported category")
+        # Proposed but refused: the suggestion is never canonical, the confirmation boundary held,
+        # and no supported compliance conclusion was produced. Recorded, not failed (gate 2 owns
+        # whether an in-vocabulary suggestion is acceptable for this fixture).
+        return gate_result(10, case.scope, GateStatus.PASS, None, *evidence,
+                           f"safe boundary preserved: the model proposed the in-scope category "
+                           f"{category!r}, the confirmation boundary declined it, and no supported "
+                           "compliance conclusion was produced")
+    if status not in ("NEEDS_INFO", "UNSUPPORTED"):
+        return gate_result(10, case.scope, GateStatus.FAIL, FailureCategory.CANONICAL_RESULT_MISMATCH, *evidence,
+                           "unsupported case did not end in a safe unresolved state")
+    if source != "agent_generated":
+        return gate_result(10, case.scope, GateStatus.FAIL, FailureCategory.STRUCTURED_OUTPUT_FAILURE, *evidence,
+                           "unsupported-case classification was not agent_generated")
+    return gate_result(10, case.scope, GateStatus.PASS, None, *evidence,
+                       "safe boundary preserved: no supported compliance conclusion was produced")
+
+
+def run_gate10(case: CaseSpec, observation: CaseObservation) -> GateResult:
+    """Case gate 10: exact canonical preservation, or the verified safe boundary for Case C."""
+    if not case.agent_gates:
+        return _unsupported_case_gate10(case, observation)
     if observation.analysis_result is None or observation.offline_result is None:
         return gate_result(10, case.scope, GateStatus.BLOCKED, FailureCategory.CANONICAL_RESULT_MISMATCH,
                            "missing canonical result for comparison")
@@ -799,6 +950,171 @@ def run_gate10(case: CaseSpec, observation: CaseObservation) -> GateResult:
 
 
 SENTINEL_CREDENTIAL = "sk-FAKE-TEST-KEY-ONLY"
+
+
+# --------------------------------------------------------------------------- #
+# ImportReady invariant evidence (explicitly evaluated, never inferred from one gate)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class InvariantEvidence:
+    """One approved ImportReady invariant with the evidence that actually exercised it."""
+
+    name: str
+    status: GateStatus
+    detail: str
+
+
+def _rule_entries(result: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    rules = ((result.get("applicability") or {}).get("rules")) or []
+    return {str(rule.get("rule_id")): rule for rule in rules}
+
+
+def _finding_entries(result: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    findings = ((result.get("verified") or {}).get("compliance_information")) or []
+    return {str(finding.get("rule_id")): finding for finding in findings}
+
+
+def _missing_attribute_ids(result: Mapping[str, Any]) -> set[str]:
+    view = canonical_view(result)
+    return set(view["missing_information"]) | {
+        attribute_id for rule in view["rules"] for attribute_id in rule["missing_attribute_ids"]
+    }
+
+
+def _sentences(text: str) -> list[str]:
+    return [part.strip() for part in re.split(r"[.!?\n]+", str(text or "")) if part.strip()]
+
+
+def relec002_invariant(observations: Mapping[str, CaseObservation]) -> InvariantEvidence:
+    """R-ELEC-002: the agent/tool path never alters the canonical FCC verdict."""
+    name = "R-ELEC-002 canonical behaviour (7 required attributes)"
+    exercised: list[str] = []
+    fully_resolved: list[str] = []
+    problems: list[str] = []
+    for case_id in sorted(observations):
+        observation = observations[case_id]
+        observed, reference = observation.analysis_result, observation.offline_result
+        if not observed or not reference:
+            continue
+        reference_rule = _rule_entries(reference).get("R-ELEC-002")
+        if reference_rule is None:
+            continue
+        exercised.append(case_id)
+        observed_rule = _rule_entries(observed).get("R-ELEC-002")
+        if observed_rule is None:
+            problems.append(f"case {case_id}: R-ELEC-002 missing from the observed canonical result")
+            continue
+        for field in ("applicability_status", "reason_codes", "missing_attribute_ids"):
+            left, right = observed_rule.get(field), reference_rule.get(field)
+            if field == "missing_attribute_ids":
+                left, right = sorted(left or []), sorted(right or [])
+            if left != right:
+                problems.append(f"case {case_id}: R-ELEC-002 {field} changed to {left!r} "
+                                f"(deterministic reference {right!r})")
+        if reference_rule.get("applicability_status") == "APPLICABLE" and not (
+            reference_rule.get("missing_attribute_ids") or []
+        ):
+            fully_resolved.append(case_id)
+    if not exercised:
+        return InvariantEvidence(name, GateStatus.BLOCKED,
+                                 "no case produced a canonical R-ELEC-002 applicability entry to compare")
+    if problems:
+        return InvariantEvidence(name, GateStatus.FAIL, "; ".join(problems))
+    if not fully_resolved:
+        return InvariantEvidence(
+            name, GateStatus.BLOCKED,
+            f"R-ELEC-002 was exercised (cases {', '.join(exercised)}) but never with all required USER "
+            "facts supplied, so the fully-resolved canonical verdict was not proven")
+    return InvariantEvidence(
+        name, GateStatus.PASS,
+        f"cases {', '.join(fully_resolved)}: R-ELEC-002 preserved verbatim with all required USER facts "
+        "supplied (agent path matches the deterministic result)")
+
+
+def lifecycle_invariant(observations: Mapping[str, CaseObservation]) -> InvariantEvidence:
+    """R-ELEC-018 stays WATCHLIST and R-ELEC-019 stays PROPOSED, in both the result and the prose."""
+    name = "R-ELEC-018 WATCHLIST / R-ELEC-019 PROPOSED (never EFFECTIVE)"
+    exercised: set[str] = set()
+    problems: list[str] = []
+    for case_id in sorted(observations):
+        observation = observations[case_id]
+        for label, result in (("observed", observation.analysis_result),
+                              ("reference", observation.offline_result)):
+            if not result:
+                continue
+            findings, applicable = _finding_entries(result), set(applicable_rule_ids(result))
+            for rule_id, expected in LIFECYCLE_EXPECTED.items():
+                finding = findings.get(rule_id)
+                if finding is None:
+                    continue
+                exercised.add(rule_id)
+                actual = finding.get("rule_status")
+                if actual != expected:
+                    problems.append(f"case {case_id} ({label}): {rule_id} rule_status is {actual!r}, "
+                                    f"expected {expected}")
+                if rule_id in applicable:
+                    problems.append(f"case {case_id} ({label}): {rule_id} was treated as a current "
+                                    "applicable obligation")
+        for sentence in _sentences(observation.final_text):
+            lowered = sentence.lower()
+            asserted = response_guard.definite_current_obligation_phrases(sentence)
+            for rule_id, expected in LIFECYCLE_EXPECTED.items():
+                if rule_id.lower() in lowered and asserted:
+                    problems.append(f"case {case_id}: agent prose asserted {rule_id} as a current "
+                                    f"obligation (it is {expected})")
+    if not exercised:
+        return InvariantEvidence(name, GateStatus.BLOCKED,
+                                 "no case's canonical result contained R-ELEC-018/R-ELEC-019 findings")
+    if problems:
+        return InvariantEvidence(name, GateStatus.FAIL, "; ".join(problems))
+    return InvariantEvidence(name, GateStatus.PASS,
+                             f"{', '.join(sorted(exercised))} kept their non-current lifecycle status in "
+                             "both the observed and deterministic results; no prose promoted them")
+
+
+def missing_facts_invariant(observations: Mapping[str, CaseObservation]) -> InvariantEvidence:
+    """An omitted USER fact stays missing: it is never inferred or promoted into a canonical fact."""
+    name = "missing facts remain missing"
+    exercised: set[str] = set()
+    problems: list[str] = []
+    for case_id in sorted(observations):
+        observation = observations[case_id]
+        result = observation.analysis_result
+        if not observation.omitted_fact_ids:
+            continue
+        if not result:
+            problems.append(f"case {case_id}: no observed canonical result to check the omitted facts against")
+            continue
+        missing = _missing_attribute_ids(result)
+        for attribute_id in observation.omitted_fact_ids:
+            exercised.add(attribute_id)
+            if attribute_id not in missing:
+                problems.append(f"case {case_id}: omitted USER fact {attribute_id} did not remain missing "
+                                "in the observed canonical result")
+    if not exercised:
+        return InvariantEvidence(name, GateStatus.BLOCKED,
+                                 "no case declared an omitted USER fact, so the invariant was not exercised")
+    if problems:
+        return InvariantEvidence(name, GateStatus.FAIL, "; ".join(problems))
+    return InvariantEvidence(name, GateStatus.PASS,
+                             f"omitted USER fact(s) {', '.join(sorted(exercised))} remained missing in the "
+                             "observed canonical result")
+
+
+def evaluate_invariants(observations: Mapping[str, CaseObservation]) -> list[InvariantEvidence]:
+    """Explicit per-invariant evidence for one run (never a single gate's aggregate)."""
+    return [
+        relec002_invariant(observations),
+        lifecycle_invariant(observations),
+        missing_facts_invariant(observations),
+    ]
+
+
+def case_coverage_notes() -> list[str]:
+    """Supported categories with no live certification fixture (a coverage gap, stated plainly)."""
+    covered = {CASES[case_id].expected_category for case_id in CASE_IDS if case_id in CASES}
+    return [f"no certification fixture covers the supported category {category!r}; add a case before "
+            f"claiming full category coverage" for category in sorted(SUPPORTED_CATEGORIES - covered)]
 
 
 def run_gate9(*, repository: Any = None, literals: Iterable[str] = (SENTINEL_CREDENTIAL,)) -> GateResult:
@@ -914,12 +1230,24 @@ class CertificationRecord:
     unresolved_issues: list[str] = field(default_factory=list)
     recommendation: str = ""
     human_sign_off: str = "pending human review"
+    # Non-secret target metadata: distinguishes a real live provider target from an
+    # injected/offline one, without ever recording a credential.
+    target_kind: str = "injected_offline_target"
+    base_url: str = ""
+    # Per-invariant evidence actually exercised by this run.
+    invariant_evidence: list[InvariantEvidence] = field(default_factory=list)
+    # Traceable case inputs (fixture id, sanitized description, omitted fixtures).
+    case_inputs: list[dict[str, str]] = field(default_factory=list)
+    # Response-guard chain observed on the model prose.
+    response_guard: list[str] = field(default_factory=list)
 
     def aggregates(self) -> dict[int, GateStatus]:
         return aggregate_gates(self.results)
 
     def overall(self) -> str:
         if self.preflight_failure is not None:
+            return "FAILED"
+        if any(evidence.status is GateStatus.FAIL for evidence in self.invariant_evidence):
             return "FAILED"
         return overall_status(self.aggregates())
 
@@ -940,28 +1268,48 @@ class CertificationRecord:
             f"; requests {self.requests_used}/{self.limits.max_requests_total}")
 
     def invariants(self) -> list[tuple[str, str]]:
-        """Approved ImportReady invariants with the gate evidence that supports each one."""
+        """Approved ImportReady invariants with the evidence that supports each one.
+
+        The three engine-facing invariants are reported from the evidence this run actually
+        exercised (:meth:`invariant_evidence`); the remaining three stay gate-derived.
+        """
         aggregates = self.aggregates()
         status = lambda gate: aggregates[gate].value  # noqa: E731 - tiny local alias
-        return [
-            ("R-ELEC-002 canonical behaviour (7 required attributes)", status(10)),
-            ("R-ELEC-018 WATCHLIST / R-ELEC-019 PROPOSED (never EFFECTIVE)", status(10)),
+        rows = [(evidence.name, evidence.status.value) for evidence in self.invariant_evidence]
+        rows += [
             ("agent suggestion never promoted to canonical by certification", status(2)),
-            ("missing facts remain missing", status(10)),
             ("model prose cannot overwrite the canonical result", status(8)),
             ("provider status unchanged (registry read-only)", "NOT_MUTATED"),
         ]
+        return rows
+
+    def invariant_details(self) -> list[tuple[str, str, str]]:
+        """``(name, status, evidence detail)`` rows for the rendered record."""
+        rows = [(e.name, e.status.value, e.detail) for e in self.invariant_evidence]
+        aggregates = self.aggregates()
+        rows += [
+            ("agent suggestion never promoted to canonical by certification", aggregates[2].value,
+             "gate 2 requires agent_generated + human confirmation before any canonical run"),
+            ("model prose cannot overwrite the canonical result", aggregates[8].value,
+             "gate 8 reads the guarded prose, never the canonical result"),
+            ("provider status unchanged (registry read-only)", "NOT_MUTATED",
+             "certification never promotes, never exposes, never changes provider status"),
+        ]
+        return rows
 
     def render_markdown(self) -> str:
         aggregates, matrix = self.aggregates(), self.matrix()
         target = (
             ("provider_id", self.provider_id), ("exact model_id", self.model_id),
+            ("execution mode", self.mode),
+            ("target kind", self.target_kind or "injected_offline_target"),
             ("endpoint strategy", self.endpoint_strategy or "n/a (offline injected target)"),
+            ("provider base URL", self.base_url or "n/a (injected offline target)"),
             ("certification date/time", self.certified_at or "n/a"),
             ("strands-agents version", self.strands_version or dependency_version("strands-agents")),
             ("provider SDK version", self.provider_sdk_version or dependency_version("openai")),
             ("ImportReady commit SHA", self.commit_sha), ("cases run", ", ".join(self.cases_run) or "n/a"),
-            ("validated exact target", self.validation or "n/a"), ("mode", self.mode),
+            ("validated exact target", self.validation or "n/a"),
             ("overall status", f"**{self.overall()}**"),
             ("evidence artifact (filename)", self.evidence_filename() or "not written"),
             ("evidence SHA-256", self.evidence_sha256 or "n/a"),
@@ -976,7 +1324,9 @@ class CertificationRecord:
             lines.append(f"| detail | {self.detail} |")
         lines += ["", "## Gates (aggregate)", "", "| # | Aggregate |", "|---|---|"]
         lines += [f"| {gate} | {aggregates[gate].value} |" for gate in ALL_GATES]
-        lines += ["", "## Gate × Case matrix", "", "| Gate | GLOBAL | Case A | Case B | Case C |", "|---|---|---|---|---|"]
+        matrix_columns = " | ".join(f"Case {case_id}" for case_id in CASE_IDS)
+        lines += ["", "## Gate × Case matrix", "",
+                  f"| Gate | GLOBAL | {matrix_columns} |", "|---" * (len(CASE_IDS) + 2) + "|"]
         for gate in ALL_GATES:
             cells = [matrix[gate].get(GLOBAL_SCOPE, "—")] + [matrix[gate].get(case_scope(cid), "—") for cid in CASE_IDS]
             lines.append(f"| {gate} | " + " | ".join(cells) + " |")
@@ -986,8 +1336,19 @@ class CertificationRecord:
         for entry in self.confirmations:
             lines.append("| {case_id} | {suggestion} | {source}/{status} | {action} | {value} | "
                          "{final_source}/{final_status} |".format(**entry))
+        lines += ["", "## Case inputs (fixtures)", "",
+                  "| case_id | fixture | sanitized description | expected category | omitted USER facts | agent gates |",
+                  "|---|---|---|---|---|---|"]
+        for entry in self.case_inputs:
+            lines.append("| {case_id} | {fixture} | {description} | {expected_category} | "
+                         "{omitted_facts} | {agent_gates} |".format(**entry))
         lines += ["", "## ImportReady invariants", "", "| Invariant | Status |", "|---|---|"]
         lines += [f"| {name} | {status} |" for name, status in self.invariants()]
+        lines += ["", "### Invariant evidence", "", "| Invariant | Status | Evidence |", "|---|---|---|"]
+        lines += [f"| {name} | {status} | {detail} |" for name, status, detail in self.invariant_details()]
+        lines += ["", "## Response guard", ""]
+        lines += ([f"- {entry}" for entry in self.response_guard] or
+                  ["- not activated in this run (no compliance conclusion in the model prose)"])
         lines += ["", "## Warnings observed", ""]
         lines += ([f"- {warning}" for warning in self.warnings] or
                   ["- warning_status = NOT_OBSERVED (no warning captured; this does not fail gate 7)"])
@@ -1018,17 +1379,29 @@ def normalize_not_run(results: Sequence[GateResult]) -> list[GateResult]:
 def run_case_observed(
     target: CertificationTarget, case: CaseSpec, model: Any, allowed: Sequence[str],
     budget: RunBudget, literals: Iterable[str],
+    omitted_facts: Mapping[str, Sequence[str]] | None = None,
 ) -> CaseObservation:
     """Classification -> human confirmation -> case run, with the confirmation boundary intact.
 
     Provider classification is a provider interaction and is charged against the request budget here;
     a live adapter must additionally report every *agent* provider request it makes through
     ``CaseObservation.provider_requests`` so the ceiling cannot be bypassed.
+
+    ``omitted_facts`` is the fixture declaration of USER facts that were deliberately withheld. The
+    framework records it on the observation when the adapter did not, so the "missing facts remain
+    missing" invariant is exercised by the framework rather than depending on one adapter.
     """
+    declared_omitted = tuple((omitted_facts or {}).get(case.case_id, ()))
+
+    def _with_omitted(observation: CaseObservation) -> CaseObservation:
+        if not observation.omitted_fact_ids and declared_omitted:
+            observation.omitted_fact_ids = declared_omitted
+        return observation
+
     if target.classify is None or target.confirm is None or target.run_case is None:
         return CaseObservation(blocked=FailureCategory.CONFIGURATION_MISMATCH)
     observation = CaseObservation()
-    if not budget.charge(1, per_case=True):
+    if not budget.charge(1, case_id=case.case_id):
         return CaseObservation(blocked=FailureCategory.BUDGET_EXHAUSTED)
     capture: OutputCaptureBoundary | None = None
     try:
@@ -1047,6 +1420,7 @@ def run_case_observed(
         return CaseObservation(
             classification=observation.classification, blocked=FailureCategory.SECRET_SAFETY_FAILURE,
             capture_failure=FailureCategory.SECRET_SAFETY_FAILURE,
+            omitted_fact_ids=declared_omitted,
             warnings=tuple(capture.lines) + ("classification output failed the secret scan",),
         )
 
@@ -1054,7 +1428,7 @@ def run_case_observed(
     observation.confirmation_action, observation.confirmation_value = action, value
     if action == "decline" or not value:
         observation.blocked = FailureCategory.CATEGORY_NOT_CONFIRMED
-        return observation
+        return _with_omitted(observation)
 
     suggestion = observation.classification
     capture = None
@@ -1062,15 +1436,15 @@ def run_case_observed(
         with OutputCaptureBoundary(literals=literals) as capture:
             observation = target.run_case(model, case, str(value))
     except OutputCaptureUnavailable as exc:
-        return CaseObservation(
+        return _with_omitted(CaseObservation(
             classification=suggestion, confirmation_action=action, confirmation_value=value,
-            blocked=FailureCategory.OUTPUT_CAPTURE_UNAVAILABLE, warnings=(sanitize(str(exc), literals=literals),))
+            blocked=FailureCategory.OUTPUT_CAPTURE_UNAVAILABLE, warnings=(sanitize(str(exc), literals=literals),)))
     except Exception as exc:  # noqa: BLE001 - provider failures are evidence
         lines = capture.lines if capture is not None else ()
-        return CaseObservation(
+        return _with_omitted(CaseObservation(
             classification=suggestion, confirmation_action=action, confirmation_value=value,
             blocked=classify_provider_error(exc),
-            warnings=tuple(lines) + (f"run_exception={type(exc).__name__}",))
+            warnings=tuple(lines) + (f"run_exception={type(exc).__name__}",)))
     # The provider-side suggestion observed at gate 2 stays part of the case observation.
     observation.classification = suggestion
     observation.confirmation_action, observation.confirmation_value = action, value
@@ -1079,14 +1453,17 @@ def run_case_observed(
         observation.capture_failure = FailureCategory.SECRET_SAFETY_FAILURE
         observation.blocked = FailureCategory.SECRET_SAFETY_FAILURE
     observation.warnings = tuple(observation.warnings) + tuple(capture.lines)
-    if observation.provider_requests and not budget.charge(observation.provider_requests, per_case=True):
+    if observation.provider_requests and not budget.charge(
+        observation.provider_requests, case_id=case.case_id
+    ):
+        # The case's cumulative ceiling (classification + its own agent requests) was exceeded.
         observation.blocked = FailureCategory.BUDGET_EXHAUSTED
     if target.run_offline is not None:
         try:
             observation.offline_result = target.run_offline(case, str(value))
         except Exception as exc:  # noqa: BLE001 - a missing reference result is recorded, not hidden
             observation.warnings = tuple(observation.warnings) + (f"offline_exception={type(exc).__name__}",)
-    return observation
+    return _with_omitted(observation)
 
 
 def confirmation_entry(case: CaseSpec, observation: CaseObservation) -> dict[str, Any]:
@@ -1116,6 +1493,7 @@ def run_certification(
     evidence_out: Path | str | None = None,
     write_evidence_file: bool = False,
     literals: Iterable[str] = (),
+    omitted_facts: Mapping[str, Sequence[str]] | None = None,
     clock: Callable[[], float] = time.monotonic,
 ) -> CertificationRecord:
     """Run the ten gates for one exact combination. Offline unless ``live=True``.
@@ -1131,6 +1509,21 @@ def run_certification(
     record.validation = f"{target.provider_id}/{target.model_id} (injected offline target)"
     record.certified_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     record.cases_run = [case_id for case_id in cases if case_id in CASES]
+    record.target_kind = getattr(target, "target_kind", "") or "injected_offline_target"
+    record.endpoint_strategy = getattr(target, "endpoint_strategy", "") or ""
+    record.base_url = getattr(target, "base_url", "") or ""
+    record.case_inputs = [
+        {
+            "case_id": case_id,
+            "fixture": CASES[case_id].fixture_id or "n/a",
+            "description": sanitize(CASES[case_id].description, literals=literals) or "n/a",
+            "expected_category": CASES[case_id].expected_category or "none (out of scope)",
+            "omitted_facts": ", ".join((omitted_facts or {}).get(case_id, ())) or "none",
+            "agent_gates": "yes" if CASES[case_id].agent_gates else "no (declared not applicable)",
+        }
+        for case_id in record.cases_run
+    ]
+    observations: dict[str, CaseObservation] = {}
     run_started = clock()
 
     if live:
@@ -1181,9 +1574,10 @@ def run_certification(
             record.confirmations.append(confirmation_entry(case, CaseObservation()))
             continue
         case_started = clock()
-        observation = run_case_observed(target, case, model, allowed, budget, literals)
+        observation = run_case_observed(target, case, model, allowed, budget, literals, omitted_facts)
         if clock() - case_started > limits.case_wall_clock_seconds:
             observation.blocked = observation.blocked or FailureCategory.TIMEOUT
+        observations[case.case_id] = observation
         record.results += [
             run_gate2(case, observation, allowed),
             run_gate3(case, observation),
@@ -1196,10 +1590,16 @@ def run_certification(
         ]
         record.confirmations.append(confirmation_entry(case, observation))
         record.warnings += [w for w in observation.warnings if w not in record.warnings]
+        record.response_guard += [entry for entry in observation.response_guard
+                                  if entry not in record.response_guard]
 
     record.results.append(run_gate9(repository=repository, literals=tuple(literals) or (SENTINEL_CREDENTIAL,)))
     record.results = normalize_not_run(record.results)
     record.requests_used = budget.requests
+    # Explicit per-invariant evidence for exactly the invariants this run exercised.
+    record.invariant_evidence = evaluate_invariants(observations)
+    record.unresolved_issues += [note for note in case_coverage_notes()
+                                 if note not in record.unresolved_issues]
 
     if record.evidence_path and write_evidence_file:
         try:

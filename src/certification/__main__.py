@@ -41,15 +41,16 @@ def build_parser() -> argparse.ArgumentParser:
         prog="importready-certification",
         description="Certify one exact (provider_id, model_id) combination. Offline; --live is guarded.")
     parser.add_argument("--provider", required=True, help="exact provider_id, e.g. deepseek")
-    parser.add_argument("--model", required=True, help="exact model_id, e.g. deepseek-flash")
+    parser.add_argument("--model", required=True, help="exact model_id, e.g. deepseek-v4-flash")
     parser.add_argument("--live", action="store_true",
                         help="guarded real-provider path: renders the plan, then stops")
     parser.add_argument("--ack", default=None,
-                        help=f'exact acknowledgement for --live, e.g. "CERTIFY deepseek/deepseek-flash" '
+                        help=f'exact acknowledgement for --live, e.g. "CERTIFY deepseek/deepseek-v4-flash" '
                              f"({ACKNOWLEDGEMENT_PLACEHOLDER}; no bypass exists)")
     parser.add_argument("--execute", action="store_true",
                         help="with --live and the exact --ack: call the existing certification runner")
-    parser.add_argument("--cases", default=",".join(CASE_IDS), help="comma-separated case ids (A,B,C)")
+    parser.add_argument("--cases", default=",".join(CASE_IDS),
+                        help=f"comma-separated case ids ({','.join(CASE_IDS)})")
     parser.add_argument("--out", default=None, help="evidence artifact path (must be outside the repo)")
     parser.add_argument("--repo-root", default=None, help="repository root for evidence-path confinement")
     parser.add_argument("--live-probe", action="store_true", help="MANUAL: one minimal real provider request")

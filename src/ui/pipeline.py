@@ -20,7 +20,9 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
 
 from src.agent.app import _contains_sensitive_input
+from src.models import ProductAttribute
 from src.repositories.compliance_repository import JsonComplianceRepository
+from src.services.actions import ActionPlan, ActionType
 from src.services.analysis import AnalysisResult, AnalysisService
 from src.services.applicability import TRIGGER_SPECS, valid_spec_rule_ids
 from src.services.classification import (
@@ -37,6 +39,7 @@ from src.services.what_if import (
     WhatIfResult,
 )
 from src.state import FactOrigin, ProductFact
+from src.ui import i18n
 from src.ui import state as ui_state
 
 #: Consumer-facing order of the canonical category vocabulary. Only values that
@@ -104,6 +107,11 @@ def build_what_if_engine(
 def allowed_categories(repository: JsonComplianceRepository) -> list[str]:
     """The canonical A-CMN-001 category vocabulary, verbatim from approved data."""
     return allowed_category_values(repository)
+
+
+def contains_sensitive_input(text: Any) -> bool:
+    """Reuse the accepted credential detector before any model use."""
+    return _contains_sensitive_input("" if text is None else str(text))
 
 
 def consumer_category_choices(repository: JsonComplianceRepository) -> list[str]:
@@ -339,6 +347,11 @@ def missing_information_split(
     Presentation grouping only; every canonical missing item is returned in exactly
     one group (``key ∪ additional == canonical set``, ``key ∩ additional == ∅``).
 
+    The split operates on **unique ``attribute_id`` values**: one canonical attribute
+    is asked once, however many rules require it. No canonical missing-information
+    item is removed from the engine result - this only decides which single widget
+    asks for that attribute.
+
     The *key* group is derived from approved metadata, never from regulatory prose:
     the required attribute ids of the rules that (a) appear in the canonical
     ``ApplicabilityResult`` of this analysis and (b) have a valid automated
@@ -348,7 +361,7 @@ def missing_information_split(
     """
     if analysis is None:
         return [], []
-    missing = list(analysis.unknown.missing_information)
+    missing = _unique_by_attribute_id(analysis.unknown.missing_information)
     if analysis.applicability is None:
         return [], missing
 
@@ -370,6 +383,132 @@ def missing_information_split(
     )
     additional = [item for item in missing if item.attribute_id not in key_position]
     return key, additional
+
+
+def _unique_by_attribute_id(items: Iterable[Any]) -> list[Any]:
+    """First occurrence per canonical ``attribute_id``; canonical order preserved."""
+    unique: list[Any] = []
+    seen: set[str] = set()
+    for item in items:
+        if item.attribute_id in seen:
+            continue
+        seen.add(item.attribute_id)
+        unique.append(item)
+    return unique
+
+
+def canonical_attribute_question(plan: ActionPlan | None, attribute_id: str) -> str | None:
+    """The canonical clarification question, only when it is attribute-exclusive.
+
+    A canonical ``MISSING_INFORMATION`` item carries the *contributing rule's*
+    ``clarification_question``, which is rule-scoped prose covering several
+    attributes at once. Such text may be used as one attribute's prompt only when
+    **no other** missing attribute carries the same text. As soon as the question is
+    shared, this returns ``None`` so a rule-level question is never borrowed by a
+    different attribute.
+    """
+    if plan is None or not attribute_id:
+        return None
+    wanted = str(attribute_id)
+    carriers: dict[str, set[str]] = {}
+    for item in plan.items:
+        if item.action_type is not ActionType.MISSING_INFORMATION or not item.attribute_id:
+            continue
+        text = (item.canonical_text or "").strip()
+        if text:
+            carriers.setdefault(text, set()).add(str(item.attribute_id))
+    for text, owners in carriers.items():
+        if wanted in owners and len(owners) == 1:
+            return text
+    return None
+
+
+def attribute_question(
+    analysis: AnalysisResult | None, attribute: ProductAttribute, lang: str
+) -> str:
+    """The customer question for exactly this attribute, in ``lang``.
+
+    Resolution authority, in order:
+
+    1. the approved localized question copy for this exact ``attribute_id``
+       (:data:`src.ui.i18n.ATTRIBUTE_QUESTIONS`),
+    2. in English only, the canonical clarification question **when it belongs to
+       this attribute alone** (:func:`canonical_attribute_question`),
+    3. approved attribute metadata: the canonical ``attribute_name`` inside a
+       localized generic prompt.
+
+    A question that belongs to a different attribute - or to a rule that merely
+    requires this attribute - is never returned.
+    """
+    if attribute is None:
+        return i18n.t("missing_question_fallback", lang, attribute="")
+    # 1. Approved localized copy is the primary authority and needs no analysis.
+    copy = i18n.attribute_question_copy(attribute.attribute_id, lang)
+    if copy:
+        return copy
+    # 2. English-only, attribute-exclusive canonical question.
+    if analysis is not None and i18n.normalize_language(lang) == i18n.DEFAULT_LANGUAGE:
+        exclusive = canonical_attribute_question(analysis.actions, attribute.attribute_id)
+        if exclusive:
+            return exclusive
+    # 3. Approved attribute metadata inside a localized generic prompt.
+    name = getattr(attribute, "attribute_name", "") or getattr(
+        attribute, "attribute_id", ""
+    )
+    return i18n.t("missing_question_fallback", lang, attribute=name)
+
+
+@dataclass(frozen=True)
+class MissingAttributeRow:
+    """One customer-input row: exactly one canonical attribute with its own question."""
+
+    attribute: ProductAttribute
+    question: str
+    group: str  # "key" | "additional"
+
+    @property
+    def attribute_id(self) -> str:
+        return self.attribute.attribute_id
+
+    @property
+    def data_type(self) -> str:
+        return self.attribute.data_type
+
+    @property
+    def allowed_values(self) -> list[str]:
+        return list(self.attribute.allowed_values)
+
+
+def missing_information_rows(
+    repository: JsonComplianceRepository,
+    analysis: AnalysisResult | None,
+    lang: str,
+) -> list[MissingAttributeRow]:
+    """Every unique canonical missing attribute, once, with its own question.
+
+    Guarantees, all presentation-layer only:
+
+    * one ``attribute_id`` produces exactly one row (and therefore one widget),
+    * ``key ∪ additional`` equals the unique canonical missing attribute-id set and
+      the groups are disjoint, so no attribute is hidden,
+    * each row's question is resolved for *that* attribute and localized,
+    * the canonical ``AnalysisResult`` is never modified.
+    """
+    key_items, additional_items = missing_information_split(repository, analysis)
+    rows: list[MissingAttributeRow] = []
+    for group, items in (("key", key_items), ("additional", additional_items)):
+        for item in items:
+            attribute = repository.get_attribute(item.attribute_id)
+            if attribute is None:
+                continue  # unknown canonical id: no widget is invented for it
+            rows.append(
+                MissingAttributeRow(
+                    attribute=attribute,
+                    question=attribute_question(analysis, attribute, lang),
+                    group=group,
+                )
+            )
+    return rows
 
 
 def current_fact_values(

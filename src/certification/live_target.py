@@ -26,7 +26,13 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, NamedTuple, Sequence
 
 from src.agent.app import _make_agent_runner, _suggest_category
-from src.agent.model_factory import CompatibilityStatus, ModelCombination, build_model, resolve_combination
+from src.agent.model_factory import (
+    PROVIDER_REGISTRY,
+    CompatibilityStatus,
+    ModelCombination,
+    build_model,
+    resolve_combination,
+)
 from src.agent.response_guard import guard_observation_text, guard_summary
 from src.certification.certification import (
     CASE_IDS,
@@ -67,6 +73,20 @@ ELEC002_REQUIRED = ("A-ELEC-002", "A-ELEC-003", "A-ELEC-007", "A-ELEC-008", "A-E
 OMITTED_FACTS: dict[str, tuple[str, ...]] = {"B": ("A-ELEC-003",)}
 SIMPLE_VALUES: dict[str, object] = {"boolean": True, "integer": 1, "number": 1.0, "decimal": 1.0, "date": "2026-01-01"}
 
+# Approved children's-toy fixture (Case D). It supplies ONLY the facts the description explicitly
+# states: the stated age, converted to the canonical month unit. Nothing is inferred from absence —
+# an unstated feature ("no magnets are mentioned") is NOT evidence for a `False` USER fact, so
+# A-TOY-012 / A-TOY-015 / A-TOY-016 / A-TOY-018 remain missing and the toy rules that need them
+# legitimately stay NEEDS_INFO / REVIEW_REQUIRED. The purpose of Case D is real classification,
+# the confirmation boundary, the tool path and exact canonical preservation - not forcing a toy
+# rule to a final applicability outcome.
+TOY_FIXTURE_FACTS: dict[str, object] = {
+    "A-TOY-001": 36,  # intended_min_age_months: "ages 3 and up", explicitly stated
+}
+# Toy attributes the description does NOT state. They must stay missing unless the description
+# states them, and no agent inference may turn them into canonical USER facts.
+TOY_UNSTATED_ATTRIBUTES: tuple[str, ...] = ("A-TOY-012", "A-TOY-015", "A-TOY-016", "A-TOY-018")
+
 
 def require_combination(provider_id: str, model_id: str) -> ModelCombination:
     """Resolve the exact combination; refuse anything unregistered or UNSUPPORTED (pure lookup)."""
@@ -94,9 +114,17 @@ def valid_attribute_value(attribute: Any) -> object:
 
 
 def build_case_facts(case: CaseSpec, repository: Any) -> list[ProductFact]:
-    """USER facts for a case, discovered from approved data (no hardcoded values)."""
+    """USER facts for a case, discovered from approved data (no invented regulatory facts)."""
     if not case.agent_gates:
         return []
+    if case.case_id == "D":
+        # The approved children's-toy fixture: only the declared controlled facts, and only for
+        # attributes that exist in the approved taxonomy.
+        return [
+            ProductFact(attribute_id=attribute_id, value=value, origin=FactOrigin.USER)
+            for attribute_id, value in TOY_FIXTURE_FACTS.items()
+            if repository.get_attribute(attribute_id) is not None
+        ]
     omitted = OMITTED_FACTS.get(case.case_id, ())
     facts: list[ProductFact] = []
     for attribute_id in ELEC002_REQUIRED:
@@ -146,6 +174,14 @@ def observation_from_run(outcome: Any, proxy: RecordingModelProxy, *, case: Case
     requests = int(getattr(proxy, "requests", 0) or 0)
     tool_uses = tuple(getattr(proxy, "tool_use_events", ()) or ())
     guarded_text, guard_result = guard_observation_text(result, final_text)
+    guard_chain: tuple[str, ...] = ()
+    if guard_result.activated:
+        # The chain is recorded explicitly: unsafe model wording was observed, the deterministic
+        # response guard intercepted it, and the canonical result was never touched.
+        guard_chain = (
+            f"{guard_summary(guard_result)}; canonical result unchanged (agent prose only)",
+            "chain: unsafe model wording observed -> response guard intercepted -> canonical output untouched",
+        )
     return CaseObservation(
         confirmed_classification=(result or {}).get("classification"),
         analysis_result=result,
@@ -160,6 +196,7 @@ def observation_from_run(outcome: Any, proxy: RecordingModelProxy, *, case: Case
         provider_requests=requests,
         warnings=tuple(warnings) + ((guard_summary(guard_result),) if guard_result.activated else ()),
         warning_class=warning_class,
+        response_guard=guard_chain,
         blocked=None if runtime.get("status") in ("SUCCEEDED", "NOT_USED") else FailureCategory.TOOL_EXECUTION_FAILURE,
     )
 
@@ -260,7 +297,20 @@ def create_live_target(provider_id: str, model_id: str, *, repository: Any = Non
         confirm=target.confirm,
         run_case=target.run_case,
         run_offline=target.run_offline,
+        # Honest, non-secret target metadata for the record. An injected model factory is an
+        # offline target by definition; only the real adapter may claim a live provider target.
+        target_kind="injected_offline_target" if model_factory is not None else "real_live_provider_target",
+        endpoint_strategy=("" if model_factory is not None else
+                           "existing environment-driven model factory (operator's own shell) via the "
+                           "official OpenAI-compatible endpoint"),
+        base_url=_descriptor_base_url(target.combination.provider_id),
     )
+
+
+def _descriptor_base_url(provider_id: str) -> str:
+    """Registered endpoint strategy for a provider (never a credential, never caller-supplied)."""
+    descriptor = PROVIDER_REGISTRY.get(str(provider_id or "").strip().lower())
+    return str(getattr(descriptor, "base_url", "") or "")
 
 
 class ProbePreflight(NamedTuple):
@@ -494,4 +544,6 @@ def run_guarded_live_certification(
         evidence_out=Path(evidence_out) if evidence_out is not None else None,
         write_evidence_file=write_evidence_file,
         literals=tuple(literals),
+        # The fixture definition drives the traceability table even before a case runs.
+        omitted_facts=OMITTED_FACTS,
     )
