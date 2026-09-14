@@ -273,10 +273,18 @@ class WhatIfView:
 # Scalar presentation
 # --------------------------------------------------------------------------- #
 def error_message(code: str | None, lang: str) -> str | None:
-    """Translate a closed UI error code into a safe, traceback-free message."""
+    """Translate a closed UI error code into a safe, traceback-free message.
+
+    Returns ``None`` for anything that is not a known error code (for example a
+    plain translation key), so callers can fall back to their own label instead of
+    silently showing a misleading generic error.
+    """
     if not code:
         return None
-    return t(_ERROR_I18N_KEY.get(code, "err_generic"), lang)
+    key = _ERROR_I18N_KEY.get(code)
+    if key is None:
+        return None
+    return t(key, lang)
 
 
 def category_label(category: str | None, lang: str) -> str:

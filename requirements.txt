@@ -2,4 +2,4 @@ pydantic>=2.7,<3
 pytest>=8.0,<10
 strands-agents>=1.55,<2
 openai>=1.68.0,<3.0.0
-streamlit>=1.36,<2
+streamlit>=1.63,<1.64

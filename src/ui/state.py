@@ -33,11 +33,18 @@ from src.agent.model_factory import (
     verified_combinations,
 )
 from src.ui.i18n import normalize_language  # re-exported for the UI layer
+from src.ui.theme import DEFAULT_THEME, normalize_theme  # re-exported for the UI layer
 
 # --------------------------------------------------------------------------- #
 # Session keys (single source of truth, never string literals at call sites)
 # --------------------------------------------------------------------------- #
 KEY_LANGUAGE = "ir_language"
+KEY_THEME = "ir_theme"
+# Presentation control widgets. They mirror KEY_LANGUAGE / KEY_THEME; the two are
+# reconciled on every run so the visible control and the rendered language/theme
+# can never disagree.
+KEY_LANGUAGE_CONTROL = "ir_language_control"
+KEY_THEME_CONTROL = "ir_theme_control"
 KEY_MODE = "ir_access_mode"
 KEY_PROVIDER = "ir_byok_provider"
 KEY_BYOK_CREDENTIAL = "ir_byok_credential"  # the only place a consumer key may live
@@ -57,7 +64,7 @@ MODE_BYOK = "byok"
 ACCESS_MODES: tuple[str, ...] = (MODE_DEMO, MODE_BYOK)
 
 #: Every session key that belongs to one product analysis. ``start_over`` clears
-#: exactly these and preserves presentation preferences (language) plus, by
+#: exactly these and preserves presentation preferences (language, theme) plus, by
 #: deliberate decision, the session-only BYOK key (Clear Key remains explicit).
 ANALYSIS_SESSION_KEYS: tuple[str, ...] = (
     KEY_DESCRIPTION,
@@ -96,6 +103,18 @@ class SessionLike(Protocol):
     def __getitem__(self, key: str) -> Any: ...
     def __setitem__(self, key: str, value: Any) -> None: ...
     def pop(self, key: str, default: Any = ...) -> Any: ...
+
+
+def read(session_state: Any, key: str, default: Any = None) -> Any:
+    """Read one session value through ``in`` + indexing only.
+
+    ``st.session_state`` and the testing wrapper both support containment and
+    indexing, but not every wrapper implements ``.get``; going through this helper
+    keeps the state layer usable with either.
+    """
+    if key in session_state:
+        return session_state[key]
+    return default
 
 
 @dataclass(frozen=True)
@@ -151,6 +170,7 @@ def initialize_state(session_state: MutableMapping[str, Any]) -> None:
     """Apply deterministic defaults without clobbering an existing session."""
     defaults: dict[str, Any] = {
         KEY_LANGUAGE: "en",
+        KEY_THEME: DEFAULT_THEME,
         KEY_MODE: MODE_DEMO,
         KEY_PROVIDER: None,
         KEY_BYOK_CREDENTIAL: None,
@@ -170,8 +190,35 @@ def initialize_state(session_state: MutableMapping[str, Any]) -> None:
             session_state[key] = value
 
 
+def reconcile_control(
+    session_state: MutableMapping[str, Any], control_key: str, state_key: str
+) -> None:
+    """Force a presentation control to match its state key before it is rendered.
+
+    Assignment happens before the widget is instantiated, which Streamlit allows.
+    This makes the visible control and the rendered presentation structurally
+    unable to disagree (for example after a stale value survives in a long-lived
+    browser session), so the page can never render in one language while the
+    selector shows another.
+    """
+    if state_key not in session_state:
+        return
+    if control_key in session_state and session_state[control_key] != session_state[state_key]:
+        session_state[control_key] = session_state[state_key]
+
+
+def set_language(session_state: MutableMapping[str, Any], value: Any) -> None:
+    """Select the UI language (presentation only; analysis state is untouched)."""
+    session_state[KEY_LANGUAGE] = normalize_language(value)
+
+
+def set_theme(session_state: MutableMapping[str, Any], value: Any) -> None:
+    """Select the UI theme (presentation only; analysis state is untouched)."""
+    session_state[KEY_THEME] = normalize_theme(value)
+
+
 def start_over(session_state: MutableMapping[str, Any]) -> None:
-    """Clear the current analysis, preserving language and the session BYOK key."""
+    """Clear the current analysis, preserving language, theme and the session BYOK key."""
     for key in ANALYSIS_SESSION_KEYS:
         session_state.pop(key, None)
     session_state[KEY_FACT_ANSWERS] = {}
@@ -192,7 +239,7 @@ def set_flash(session_state: MutableMapping[str, Any], key: str, level: str = "i
 
 def take_flash(session_state: MutableMapping[str, Any]) -> dict[str, str] | None:
     """Read and clear the queued UI message."""
-    flash = session_state.get(KEY_FLASH)
+    flash = read(session_state, KEY_FLASH)
     session_state[KEY_FLASH] = None
     return flash
 
@@ -213,7 +260,7 @@ def get_byok_credential(session_state: MutableMapping[str, Any]) -> str | None:
 
     Callers must never render, log or serialize the returned value.
     """
-    value = session_state.get(KEY_BYOK_CREDENTIAL)
+    value = read(session_state, KEY_BYOK_CREDENTIAL)
     return value if isinstance(value, str) and value else None
 
 
@@ -329,7 +376,7 @@ def resolve_byok_model(session_state: MutableMapping[str, Any]) -> ModelResoluti
     options = consumer_provider_options()
     if not options:
         return ModelResolution(error_code=ERROR_PROVIDER_NONE_AVAILABLE)
-    selected = session_state.get(KEY_PROVIDER)
+    selected = read(session_state, KEY_PROVIDER)
     option = next((item for item in options if item.provider_id == selected), None)
     if option is None:
         option = options[0]
@@ -373,7 +420,7 @@ def resolve_model(
     session_state: MutableMapping[str, Any], mode: str | None = None
 ) -> ModelResolution:
     """Resolve the model for the active access mode (never raises)."""
-    active = (mode or session_state.get(KEY_MODE) or MODE_DEMO)
+    active = (mode or read(session_state, KEY_MODE) or MODE_DEMO)
     if active == MODE_BYOK:
         return resolve_byok_model(session_state)
     return resolve_competition_demo_model()

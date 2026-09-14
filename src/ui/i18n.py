@@ -25,17 +25,21 @@ _ZH: dict[str, str] = {
     # -- header ---------------------------------------------------------- #
     "app_title": "ImportReady AI",
     "app_subtitle": "美国进口合规助手",
-    "disclaimer": "仅供参考，不构成法律意见，也不代表已获批准进口。",
+    "app_tagline": "在商品进入美国市场前，了解可能涉及的合规要求。",
+    "disclaimer": "仅供规划参考，不构成法律建议，也不代表进口批准。",
     # -- sidebar / access ------------------------------------------------ #
     "settings_title": "模型与访问",
     "language_label": "语言",
+    "appearance_label": "外观",
+    "theme_light": "浅色",
+    "theme_dark": "深色",
     "mode_label": "模式",
     "mode_demo": "竞赛演示模式",
     "mode_byok": "使用我自己的 API Key",
-    "demo_provider_available": "竞赛演示提供商已配置。",
-    "demo_provider_not_configured": "本机服务器未配置竞赛演示提供商。",
-    "demo_provider_not_verified": "已配置的竞赛演示提供商尚未通过认证，暂不可用于消费者演示。",
-    "demo_deterministic_note": "即使没有 AI 提供商，确定性合规分析仍可正常使用。",
+    "demo_provider_available": "竞赛演示模型已配置。",
+    "demo_provider_not_configured": "本地服务器尚未配置可用于比赛演示的正式模型。",
+    "demo_provider_not_verified": "已配置的模型尚未通过消费者演示认证，暂不可用于比赛演示。",
+    "demo_deterministic_note": "即使没有 AI 模型，确定性合规分析仍可正常使用。",
     "provider_label": "提供商",
     "provider_none_available": "当前没有可用于消费者自带密钥的提供商。此界面仅支持已验证并开放给消费者的提供商。",
     "api_key_label": "API Key",
@@ -48,6 +52,7 @@ _ZH: dict[str, str] = {
     "started_over": "已重置，可开始新的商品分析。",
     # -- section 1: product ---------------------------------------------- #
     "product_section": "商品",
+    "product_helper": "按上架销售时的说法描述商品即可，无需专业术语。",
     "product_description": "商品描述",
     "product_placeholder": "例如：蓝牙无线耳机，带可充电锂离子电池和 USB-C 充电盒……",
     "analyze_product": "分析商品",
@@ -165,7 +170,7 @@ _ZH: dict[str, str] = {
     "cost_no_total_note": "不计算总额（可能包含不同币种、不同计价方式及备选记录）。",
     "cost_notes": "成本说明",
     "action_notes": "行动计划说明",
-    "results_placeholder": "确认品类并运行分析后，此处将显示分析结果。",
+    "results_placeholder": "确认品类并完成分析后，结果将在此显示。",
     "save_key": "保存密钥",
     "no_costs": "该品类暂无已批准的成本参考记录。",
     # -- what-if --------------------------------------------------------- #
@@ -213,13 +218,13 @@ _ZH: dict[str, str] = {
     "technical_generated_at": "数据生成时间",
     "technical_collapsed_hint": "默认收起，展开可查看编号、状态与来源。",
     # -- errors ---------------------------------------------------------- #
-    "err_provider_unavailable": "AI 服务暂时不可用，未生成合规结论。",
+    "err_provider_unavailable": "AI 服务暂时不可用，本次未生成合规结论。",
     "err_invalid_credential": "API Key 校验失败，请检查密钥或改用其他可用提供商。",
     "err_analysis_failed": "分析未能完成，未生成合规结论。",
     "err_what_if_input": "该假设变化无法应用，请调整后重试。",
     "err_what_if_configuration": "情景模拟内部状态不一致，未生成情景结果。",
     "err_unsupported_category": "该品类暂无已验证的合规数据。",
-    "err_generic": "操作未能完成，请重试。",
+    "err_generic": "操作失败，请重试。",
 }
 
 
@@ -227,26 +232,26 @@ _EN: dict[str, str] = {
     # -- header ---------------------------------------------------------- #
     "app_title": "ImportReady AI",
     "app_subtitle": "US Import Compliance Assistant",
-    "disclaimer": (
-        "Reference information only. This is not legal advice and does not confirm "
-        "compliance or approval to import."
-    ),
+    "app_tagline": "Understand what your product may need before entering the U.S. market.",
+    "disclaimer": "For planning support only. This is not legal advice or import approval.",
     # -- sidebar / access ------------------------------------------------ #
-    "settings_title": "Model & Access",
+    "settings_title": "Model & access",
     "language_label": "Language",
+    "appearance_label": "Appearance",
+    "theme_light": "Light",
+    "theme_dark": "Dark",
     "mode_label": "Mode",
     "mode_demo": "Competition Demo",
     "mode_byok": "Use My Own API Key",
-    "demo_provider_available": "Competition Demo provider is available.",
+    "demo_provider_available": "Competition Demo model is configured.",
     "demo_provider_not_configured": (
         "Competition Demo provider is not configured on this local server."
     ),
     "demo_provider_not_verified": (
-        "The configured Competition Demo provider is not certified for consumer "
-        "demo use."
+        "The configured model is not certified for consumer demo use."
     ),
     "demo_deterministic_note": (
-        "Deterministic compliance analysis still works without an AI provider."
+        "Deterministic compliance analysis still works without an AI model."
     ),
     "provider_label": "Provider",
     "provider_none_available": (
@@ -263,6 +268,9 @@ _EN: dict[str, str] = {
     "started_over": "Cleared. You can start a new product analysis.",
     # -- section 1: product ---------------------------------------------- #
     "product_section": "Product",
+    "product_helper": (
+        "Describe the product the way you would list it for sale. Plain language is fine."
+    ),
     "product_description": "Product Description",
     "product_placeholder": (
         "e.g. Bluetooth wireless earbuds with a rechargeable lithium-ion battery "
@@ -405,7 +413,7 @@ _EN: dict[str, str] = {
     "cost_notes": "Cost notes",
     "action_notes": "Action plan notes",
     "results_placeholder": (
-        "Results appear here after you confirm a category and run the analysis."
+        "Confirm the category and complete the analysis to see results here."
     ),
     "save_key": "Save Key",
     # -- what-if --------------------------------------------------------- #
@@ -478,7 +486,7 @@ _EN: dict[str, str] = {
     "err_unsupported_category": (
         "Verified compliance data is not available for this category."
     ),
-    "err_generic": "The action could not be completed. Please try again.",
+    "err_generic": "Something went wrong. Please try again.",
 }
 
 #: Fixed translation table. ``en`` is the fallback language for every key.

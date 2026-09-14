@@ -33,6 +33,10 @@ def _lang(session_state: MutableMapping[str, Any]) -> str:
     return ui_state.normalize_language(session_state.get(ui_state.KEY_LANGUAGE))
 
 
+def _theme(session_state: MutableMapping[str, Any]) -> str:
+    return ui_state.normalize_theme(session_state.get(ui_state.KEY_THEME))
+
+
 def _load_analysis(session_state: MutableMapping[str, Any]) -> AnalysisResult | None:
     raw = session_state.get(ui_state.KEY_ANALYSIS)
     if not raw:
@@ -182,8 +186,15 @@ def main() -> None:
     )
     session_state = st.session_state
     ui_state.initialize_state(session_state)
+    # Presentation controls mirror the language/theme state keys; reconcile before
+    # the widgets are created so the visible control can never disagree with the
+    # rendered language or theme.
+    ui_state.reconcile_control(
+        session_state, ui_state.KEY_LANGUAGE_CONTROL, ui_state.KEY_LANGUAGE
+    )
+    ui_state.reconcile_control(session_state, ui_state.KEY_THEME_CONTROL, ui_state.KEY_THEME)
 
-    ui.inject_styles()
+    ui.inject_theme(_theme(session_state))
     lang = _lang(session_state)
 
     ui.render_sidebar(session_state, lang)

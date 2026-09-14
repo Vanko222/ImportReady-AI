@@ -31,6 +31,7 @@ from src.services.cost import CostCalculationStatus
 from src.services.risk import RiskLevel
 from src.state import FactOrigin, ProductFact
 from src.ui import pipeline, presenters, state as ui_state
+from src.ui import theme as theme
 from src.ui.i18n import (
     DEFAULT_LANGUAGE,
     LANGUAGE_LABELS,
@@ -959,6 +960,7 @@ def _smoke_button(app, label):
 
 def _smoke_widget(app, key):
     for collection in (
+        app.segmented_control,
         app.radio,
         app.text_input,
         app.number_input,
@@ -983,36 +985,37 @@ def test_consumer_app_smoke_and_primary_demo_flow() -> None:
     app.run()
     assert list(app.exception) == []
 
-    # Required surface (section 37 checklist).
+    # Required surface.
     assert any(w.label == t("product_description", "en") for w in app.text_area)
     assert _smoke_button(app, t("analyze_product", "en"))
-    assert any(r.label == t("language_label", "en") for r in app.sidebar.radio)
+    assert any(
+        c.label == t("language_label", "en") for c in app.sidebar.segmented_control
+    )
+    assert any(
+        c.label == t("appearance_label", "en") for c in app.sidebar.segmented_control
+    )
     assert any(r.label == t("mode_label", "en") for r in app.sidebar.radio)
     assert _smoke_button(app, t("clear_key", "en"))
 
     # Bilingual switch changes UI-owned labels only.
-    next(r for r in app.sidebar.radio if r.label == t("language_label", "en")).set_value(
-        "zh"
-    ).run()
+    _smoke_widget(app, ui_state.KEY_LANGUAGE_CONTROL).set_value("zh").run()
     assert list(app.exception) == []
     assert _smoke_button(app, t("analyze_product", "zh"))
-    next(r for r in app.sidebar.radio if r.label == t("language_label", "zh")).set_value(
-        "en"
-    ).run()
+    _smoke_widget(app, ui_state.KEY_LANGUAGE_CONTROL).set_value("en").run()
     assert list(app.exception) == []
 
     # Section 1 -> 2: description, safe no-provider state, human confirmation.
     app.text_area[0].set_value("Bluetooth wireless earbuds with a rechargeable battery").run()
     _smoke_button(app, t("analyze_product", "en")).click().run()
     assert list(app.exception) == []
-    assert any(t("no_suggestion", "en") in element.value for element in app.info)
+    assert t("no_suggestion", "en") in _all_text(app)
 
     next(s for s in app.selectbox if s.label == t("category_choice", "en")).set_value(
         "small_consumer_electronics"
     ).run()
     _smoke_button(app, t("confirm_and_analyze", "en")).click().run()
     assert list(app.exception) == []
-    assert any(t("category_confirmed", "en") in element.value for element in app.success)
+    assert t("category_confirmed", "en") in _all_text(app)
 
     headings = [
         element.value for element in app.markdown if isinstance(element.value, str)
@@ -1029,19 +1032,26 @@ def test_consumer_app_smoke_and_primary_demo_flow() -> None:
 
     # Applicable Requirements shows confirmed-applicable rules only: with the RF
     # flag alone no verdict is APPLICABLE, so the safe wording is shown instead.
-    assert any(t("no_requirements", "en") in element.value for element in app.info)
+    assert t("no_requirements", "en") in _all_text(app)
     # Risk tail is reachable behind a real control.
     expander_labels = [expander.label for expander in app.expander]
-    assert any("View remaining" in label for label in expander_labels)
-    assert not any("No applicable requirement" in str(element.value) for element in app.error)
+    assert any(
+        label.startswith(t("view_remaining", "en").split("{")[0].strip())
+        for label in expander_labels
+    )
 
     # Section 3 is progressively disclosed: key information first, the rest behind a
     # collapsed "Additional information (N)" control - both groups answerable.
-    assert any("Key information" in heading for heading in headings)
-    assert any("Additional information (" in label for label in expander_labels)
+    assert any(t("key_information", "en") in heading for heading in headings)
+    assert any(
+        label.startswith(t("additional_information", "en").split("{")[0].strip())
+        for label in expander_labels
+    )
     key_group_widgets = [
         widget
-        for widget in list(app.radio) + list(app.selectbox) + list(app.text_input)
+        for widget in list(app.segmented_control)
+        + list(app.selectbox)
+        + list(app.text_input)
         if str(widget.key).startswith("ir_fact_")
     ]
     assert key_group_widgets
@@ -1062,10 +1072,7 @@ def test_consumer_app_smoke_and_primary_demo_flow() -> None:
     _smoke_button(app, t("update_analysis", "en")).click().run()
     assert list(app.exception) == []
 
-    blob = " ".join(
-        [value.value for value in app.markdown if isinstance(value.value, str)]
-        + [element.value for element in app.caption]
-    )
+    blob = _all_text(app)
     assert "R-ELEC-002" in blob
     assert t("risk_high", "en") in blob
 
@@ -1084,17 +1091,14 @@ def test_consumer_app_smoke_and_primary_demo_flow() -> None:
         if isinstance(value.value, str)
     )
     assert rule.requirement in applicable_blob
-    assert not any(t("no_requirements", "en") in element.value for element in app.info)
+    assert t("no_requirements", "en") not in blob
 
     # Section 4: the approved What-if engine produces the R-ELEC-002 delta.
     _smoke_widget(app, "ir_wi_A-ELEC-002").set_value(False).run()
     assert list(app.exception) == []
     _smoke_button(app, t("run_what_if", "en")).click().run()
     assert list(app.exception) == []
-    blob = " ".join(
-        [value.value for value in app.markdown if isinstance(value.value, str)]
-        + [element.value for element in app.caption]
-    )
+    blob = _all_text(app)
     assert t("hypothetical_scenario", "en") in blob
     assert t("changed_requirements", "en") in blob
     assert "R-ELEC-002" in blob
@@ -1106,3 +1110,446 @@ def test_consumer_app_smoke_and_primary_demo_flow() -> None:
     _smoke_button(app, t("start_over", "en")).click().run()
     assert list(app.exception) == []
     assert _smoke_button(app, t("analyze_product", "en"))
+
+
+# --------------------------------------------------------------------------- #
+# Bilingual audit (no Chinese UI copy in English mode and vice versa)
+# --------------------------------------------------------------------------- #
+CJK = re.compile(r"[\u4e00-\u9fff]")
+
+#: The only CJK string allowed while English is selected: a language is always
+#: shown in its own script.
+ALLOWED_CJK_IN_ENGLISH = {"中文"}
+
+
+def _visible_strings(app) -> list[str]:
+    """Every user-visible string the Streamlit testing API exposes."""
+    values: list[str] = []
+
+    def add(element, attribute: str) -> None:
+        value = getattr(element, attribute, None)
+        if isinstance(value, str):
+            values.append(value)
+
+    for element in app.markdown:
+        add(element, "value")
+    for element in list(app.caption) + list(app.button) + list(app.expander):
+        add(element, "label")
+        add(element, "value")
+    for collection in (
+        app.radio,
+        app.segmented_control,
+        app.selectbox,
+        app.text_area,
+        app.text_input,
+        app.number_input,
+    ):
+        for element in collection:
+            add(element, "label")
+            for option in getattr(element, "options", []) or []:
+                values.append(str(option))
+    return values
+
+
+def _all_text(app) -> str:
+    return " \n ".join(_visible_strings(app))
+
+
+def _run_app():
+    from streamlit.testing.v1 import AppTest
+
+    app = AppTest.from_file(str(PROJECT_ROOT / "app.py"), default_timeout=90)
+    app.run()
+    assert list(app.exception) == []
+    return app
+
+
+def test_default_language_and_theme_are_english_and_light() -> None:
+    app = _run_app()
+    assert app.session_state[ui_state.KEY_LANGUAGE] == "en"
+    assert app.session_state[ui_state.KEY_THEME] == "light"
+    language_control = _smoke_widget(app, ui_state.KEY_LANGUAGE_CONTROL)
+    assert language_control.value == "en"
+    assert _smoke_widget(app, ui_state.KEY_THEME_CONTROL).value == "light"
+    assert t("app_title", "en") in _all_text(app)
+
+
+def test_english_mode_shows_no_chinese_ui_copy() -> None:
+    """The reported bug: English selected must not render Chinese UI copy."""
+    app = _run_app()
+    offenders = [
+        value
+        for value in _visible_strings(app)
+        if CJK.search(value) and value.strip() not in ALLOWED_CJK_IN_ENGLISH
+    ]
+    assert offenders == []
+
+    # ... and the same after the full product flow, including empty/error states.
+    app.text_area[0].set_value("Bluetooth wireless earbuds").run()
+    _smoke_button(app, t("analyze_product", "en")).click().run()
+    _smoke_button(app, t("analyze_product", "en")).click().run()  # empty-description state
+    assert list(app.exception) == []
+    offenders = [
+        value
+        for value in _visible_strings(app)
+        if CJK.search(value) and value.strip() not in ALLOWED_CJK_IN_ENGLISH
+    ]
+    assert offenders == []
+
+
+def test_chinese_mode_translates_the_main_surface() -> None:
+    app = _run_app()
+    _smoke_widget(app, ui_state.KEY_LANGUAGE_CONTROL).set_value("zh").run()
+    assert list(app.exception) == []
+    assert app.session_state[ui_state.KEY_LANGUAGE] == "zh"
+
+    text = _all_text(app)
+    for key in (
+        "app_subtitle",
+        "product_section",
+        "product_description",
+        "analyze_product",
+        "results_section",
+        "language_label",
+        "appearance_label",
+        "settings_title",
+        "start_over",
+        "clear_key",
+    ):
+        assert t(key, "zh") in text, key
+    # The English UI copy is gone (brand and canonical content stay untouched).
+    assert t("product_description", "en") not in text
+    assert t("analyze_product", "en") not in text
+    assert "ImportReady AI" in text
+
+
+def test_language_switch_preserves_analysis_facts_and_credential() -> None:
+    app = _run_app()
+    app.session_state[ui_state.KEY_BYOK_CREDENTIAL] = FAKE_KEY
+    app.text_area[0].set_value("Bluetooth wireless earbuds with a battery").run()
+    _smoke_button(app, t("analyze_product", "en")).click().run()
+    next(s for s in app.selectbox if s.label == t("category_choice", "en")).set_value(
+        "small_consumer_electronics"
+    ).run()
+    _smoke_button(app, t("confirm_and_analyze", "en")).click().run()
+    assert list(app.exception) == []
+
+    analysis_before = json.dumps(app.session_state[ui_state.KEY_ANALYSIS], default=str)
+    facts_before = dict(app.session_state[ui_state.KEY_FACT_ANSWERS])
+
+    _smoke_widget(app, ui_state.KEY_LANGUAGE_CONTROL).set_value("zh").run()
+    assert list(app.exception) == []
+    assert json.dumps(app.session_state[ui_state.KEY_ANALYSIS], default=str) == analysis_before
+    assert dict(app.session_state[ui_state.KEY_FACT_ANSWERS]) == facts_before
+    assert app.session_state[ui_state.KEY_CONFIRMED_CATEGORY] == "small_consumer_electronics"
+    assert ui_state.get_byok_credential(app.session_state) == FAKE_KEY
+    assert FAKE_KEY not in _all_text(app)
+    assert ui_state.credential_mask() in _all_text(app)
+
+
+# --------------------------------------------------------------------------- #
+# Light / dark theme
+# --------------------------------------------------------------------------- #
+def test_theme_tokens_are_complete_and_distinct() -> None:
+    names = theme.token_names()
+    assert "background" in names and "sidebar_background" in names
+    assert len(names) == len(set(names))
+    for name in names:
+        light = theme.TOKENS["light"][name]
+        dark = theme.TOKENS["dark"][name]
+        assert light and dark
+    assert theme.TOKENS["light"]["background"] != theme.TOKENS["dark"]["background"]
+    assert theme.TOKENS["light"]["text_primary"] != theme.TOKENS["dark"]["text_primary"]
+
+
+def test_theme_css_is_token_driven_with_no_stray_literal_colors() -> None:
+    for name in theme.THEMES:
+        css = theme.theme_css(name)
+        assert "--ir-background:" in css
+        assert "var(--ir-background)" in css
+        # Every hex literal is a token definition, never an inline component color.
+        assert len(re.findall(r"#[0-9A-Fa-f]{6}", css)) == len(theme.token_names())
+        # Both themes emit the same structural style sheet.
+        assert css.count("ir-note--error") == 1
+
+
+def test_theme_css_differs_between_light_and_dark() -> None:
+    light = theme.theme_css("light")
+    dark = theme.theme_css("dark")
+    assert light != dark
+    assert theme.TOKENS["dark"]["background"] in dark
+    assert theme.TOKENS["dark"]["background"] not in light
+
+
+def test_theme_normalization_defaults_to_light() -> None:
+    assert theme.normalize_theme("DARK") == "dark"
+    assert theme.normalize_theme("dark") == "dark"
+    assert theme.normalize_theme("solarized") == theme.DEFAULT_THEME
+    assert theme.normalize_theme(None) == "light"
+
+
+# --------------------------------------------------------------------------- #
+# Final minor visual polish (light primary-button contrast + light hierarchy)
+# --------------------------------------------------------------------------- #
+def _relative_luminance(color: str) -> float:
+    """WCAG relative luminance for a ``#RRGGBB`` value."""
+    channels = [int(color[index : index + 2], 16) / 255 for index in (1, 3, 5)]
+
+    def linear(value: float) -> float:
+        return value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
+
+    red, green, blue = (linear(value) for value in channels)
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+def _contrast_ratio(foreground: str, background: str) -> float:
+    light, dark = sorted(
+        (_relative_luminance(foreground), _relative_luminance(background)), reverse=True
+    )
+    return (light + 0.05) / (dark + 0.05)
+
+
+def test_light_primary_button_uses_high_contrast_foreground() -> None:
+    """Light primary buttons must be white-on-blue, including hover and focus."""
+    light = theme.TOKENS["light"]
+    ratio = _contrast_ratio(light["accent_text"], light["accent"])
+    assert ratio >= 4.5, ratio
+    assert _contrast_ratio(light["accent_text"], light["accent_hover"]) >= 4.5
+
+    css = theme.theme_css("light")
+    # Explicit foreground for primary buttons, on the button and on its label
+    # (Streamlit renders the label inside a markdown container).
+    assert 'button[kind="primary"] :is(p, div, span)' in css
+    for key in (
+        "ir_analyze",
+        "ir_confirm_category",
+        "ir_update_analysis",
+        "ir_run_what_if",
+    ):
+        assert f".st-key-{key} button :is(p, div, span)" in css
+        assert f".st-key-{key} button:hover :is(p, div, span)" in css
+        assert f".st-key-{key} button:focus :is(p, div, span)" in css
+    # The button label never inherits the body text colour.
+    assert (
+        '[data-testid="stButton"] button :is(p, div, span),\n'
+        '[data-testid="stFormSubmitButton"] button :is(p, div, span) { color: inherit; }'
+        in css
+    )
+
+
+def test_dark_primary_button_stays_readable() -> None:
+    """Dark passed visual review: its resting primary button stays AA-readable.
+
+    The dark hover shade measures 4.09:1 with white text (just under the 4.5 AA
+    normal-text threshold, above the 3:1 large-text/UI-component threshold). Raising
+    it would mean changing an approved dark token, which is outside this light-only
+    polish task, so it is asserted at the UI-component threshold and reported to the
+    human reviewer instead of being silently retuned.
+    """
+    dark = theme.TOKENS["dark"]
+    assert _contrast_ratio(dark["accent_text"], dark["accent"]) >= 4.5
+    assert _contrast_ratio(dark["accent_text"], dark["accent_hover"]) >= 3.0
+    # Dark still uses the reviewed accent pair (no light value leaked in).
+    assert dark["accent"] == "#2E6EA8"
+    assert dark["accent_hover"] == "#3C82BF"
+
+
+def test_light_theme_hierarchy_tokens_are_more_defined() -> None:
+    """Light surfaces/borders are more defined but still subtle and unsaturating."""
+    light = theme.TOKENS["light"]
+
+    # Borders are visible against the page, yet stay light (no dark borders).
+    border_ratio = _contrast_ratio(light["border"], light["background"])
+    assert 1.1 <= border_ratio <= 2.0, border_ratio
+    assert _contrast_ratio(light["border_strong"], light["background"]) > border_ratio
+    assert _relative_luminance(light["border"]) > 0.5
+
+    # Selected control surface is clearly distinct from page and unselected control.
+    assert _contrast_ratio(light["accent_selected"], light["background"]) > 1.1
+    assert light["accent_selected"] != light["surface"]
+    assert light["accent_selected"] != light["accent_soft"]
+    assert _relative_luminance(light["accent_selected"]) > 0.5  # still a light tint
+
+    # Section-level text keeps a very high contrast ratio.
+    assert _contrast_ratio(light["text_primary"], light["background"]) >= 7.0
+    assert _contrast_ratio(light["text_muted"], light["background"]) >= 4.5
+
+
+def test_selected_segmented_control_styling_exists() -> None:
+    for name in theme.THEMES:
+        css = theme.theme_css(name)
+        assert '[data-testid="stButtonGroup"] button[aria-checked="true"]' in css
+        assert "background: var(--ir-accent-selected)" in css
+        assert "border-color: var(--ir-accent)" in css
+    # The definition ring is a light-only refinement: dark renders as reviewed.
+    assert "inset 0 0 0 1px var(--ir-accent)" in theme.theme_css("light")
+    assert "box-shadow" not in theme.theme_css("dark")
+    assert "box-shadow" not in theme._STYLESHEET
+
+
+def test_four_approved_visual_states_render_cleanly() -> None:
+    """English/中文 × Light/Dark: every reviewed combination still renders."""
+    for language in ("en", "zh"):
+        for appearance in ("light", "dark"):
+            app = _run_app()
+            _smoke_widget(app, ui_state.KEY_LANGUAGE_CONTROL).set_value(language).run()
+            _smoke_widget(app, ui_state.KEY_THEME_CONTROL).set_value(appearance).run()
+            assert list(app.exception) == [], (language, appearance)
+            assert app.session_state[ui_state.KEY_LANGUAGE] == language
+            assert app.session_state[ui_state.KEY_THEME] == appearance
+            assert _smoke_button(app, t("analyze_product", language))
+            assert t("product_description", language) in _all_text(app)
+            if language == "en":
+                offenders = [
+                    value
+                    for value in _visible_strings(app)
+                    if CJK.search(value) and value.strip() not in ALLOWED_CJK_IN_ENGLISH
+                ]
+                assert offenders == []
+            # The selected theme's own palette is the one that would be injected.
+            assert theme.TOKENS[appearance]["background"] in theme.theme_css(appearance)
+            other = "dark" if appearance == "light" else "light"
+            assert theme.TOKENS[other]["background"] not in theme.theme_css(appearance)
+
+
+def test_dark_theme_tokens_are_unchanged_by_the_light_polish() -> None:
+    """Dark passed visual review; the light polish must not touch its palette."""
+    expected_dark = {
+        "background": "#101722",
+        "surface": "#17202D",
+        "surface_alt": "#1D2634",
+        "surface_elevated": "#1B2533",
+        "text_primary": "#E8EDF4",
+        "text_secondary": "#BAC5D3",
+        "text_muted": "#97A5B7",
+        "border": "#2B3646",
+        "border_strong": "#3A475A",
+        "accent": "#2E6EA8",
+        "accent_hover": "#3C82BF",
+        "accent_soft": "#1B2B3D",
+        "accent_text": "#FFFFFF",
+        "input_background": "#131C28",
+        "sidebar_background": "#0C131C",
+    }
+    for token, value in expected_dark.items():
+        assert theme.TOKENS["dark"][token] == value, token
+    # The parity-only selected token keeps the reviewed dark selected surface.
+    assert theme.TOKENS["dark"]["accent_selected"] == theme.TOKENS["dark"]["accent_soft"]
+    # No light value leaked into the dark palette (white-on-accent is shared by design).
+    for token in theme.token_names():
+        if token == "accent_text":
+            assert theme.TOKENS["dark"][token] == "#FFFFFF"
+            continue
+        assert theme.TOKENS["dark"][token] != theme.TOKENS["light"][token], token
+
+
+def test_main_content_width_targets_a_wide_desktop() -> None:
+    width = int(theme.LAYOUT["content_width"].replace("px", ""))
+    assert 1050 <= width <= 1200
+    assert "max-width: var(--ir-content-width)" in theme.theme_css("light")
+
+
+def test_theme_switch_dark_and_back() -> None:
+    app = _run_app()
+    _smoke_widget(app, ui_state.KEY_THEME_CONTROL).set_value("dark").run()
+    assert list(app.exception) == []
+    assert app.session_state[ui_state.KEY_THEME] == "dark"
+    assert _smoke_widget(app, ui_state.KEY_THEME_CONTROL).value == "dark"
+
+    _smoke_widget(app, ui_state.KEY_THEME_CONTROL).set_value("light").run()
+    assert list(app.exception) == []
+    assert app.session_state[ui_state.KEY_THEME] == "light"
+
+
+def test_theme_switch_preserves_product_state_and_credential() -> None:
+    app = _run_app()
+    app.session_state[ui_state.KEY_BYOK_CREDENTIAL] = FAKE_KEY
+    app.text_area[0].set_value("Bluetooth wireless earbuds with a battery").run()
+    _smoke_button(app, t("analyze_product", "en")).click().run()
+    next(s for s in app.selectbox if s.label == t("category_choice", "en")).set_value(
+        "small_consumer_electronics"
+    ).run()
+    _smoke_button(app, t("confirm_and_analyze", "en")).click().run()
+    analysis_before = json.dumps(app.session_state[ui_state.KEY_ANALYSIS], default=str)
+
+    _smoke_widget(app, ui_state.KEY_THEME_CONTROL).set_value("dark").run()
+    assert list(app.exception) == []
+    assert json.dumps(app.session_state[ui_state.KEY_ANALYSIS], default=str) == analysis_before
+    assert app.session_state[ui_state.KEY_DESCRIPTION]
+    assert ui_state.get_byok_credential(app.session_state) == FAKE_KEY
+    assert FAKE_KEY not in _all_text(app)
+
+
+def test_start_over_preserves_theme_and_language() -> None:
+    app = _run_app()
+    _smoke_widget(app, ui_state.KEY_THEME_CONTROL).set_value("dark").run()
+    _smoke_widget(app, ui_state.KEY_LANGUAGE_CONTROL).set_value("zh").run()
+    app.session_state[ui_state.KEY_BYOK_CREDENTIAL] = FAKE_KEY
+    app.text_area[0].set_value("Bluetooth wireless earbuds").run()
+    _smoke_button(app, t("analyze_product", "zh")).click().run()
+    assert list(app.exception) == []
+
+    app.session_state[ui_state.KEY_BYOK_CREDENTIAL] = FAKE_KEY
+    _smoke_button(app, t("start_over", "zh")).click().run()
+    assert list(app.exception) == []
+    assert app.session_state[ui_state.KEY_THEME] == "dark"
+    assert app.session_state[ui_state.KEY_LANGUAGE] == "zh"
+    assert app.session_state[ui_state.KEY_ANALYSIS] is None
+    assert app.session_state[ui_state.KEY_CONFIRMED_CATEGORY] is None
+    assert ui_state.get_byok_credential(app.session_state) == FAKE_KEY
+
+
+def test_header_brand_copy_is_translated_in_both_languages() -> None:
+    for key in ("app_subtitle", "app_tagline", "disclaimer"):
+        assert t(key, "en") and t(key, "zh")
+        assert t(key, "en") != t(key, "zh")
+    assert "ImportReady AI" in t("app_title", "en") == t("app_title", "zh")
+
+
+def test_generic_and_provider_error_messages_are_localized() -> None:
+    # An unknown value is not an error code: callers fall back to their own label.
+    assert presenters.error_message("unknown_error_code", "en") is None
+    assert presenters.error_message(ui_state.ERROR_ANALYSIS_FAILED, "en") == t(
+        "err_analysis_failed", "en"
+    )
+    assert t("err_generic", "en") == "Something went wrong. Please try again."
+    assert t("err_generic", "zh") == "操作失败，请重试。"
+    assert CJK.search(presenters.error_message("analysis_failed", "zh") or "")
+    assert not CJK.search(presenters.error_message("analysis_failed", "en") or "")
+
+
+def test_unavailable_provider_and_empty_results_are_neutral_not_errors() -> None:
+    app = _run_app()
+    # No native error surface before the user has done anything.
+    assert list(app.error) == []
+    assert list(app.warning) == []
+    text = _all_text(app)
+    # The demo provider state is always a calm note: unconfigured, or configured
+    # but not certified for consumer use (never an error banner).
+    assert (
+        t("demo_provider_not_configured", "en") in text
+        or t("demo_provider_not_verified", "en") in text
+    )
+    assert t("results_placeholder", "en") in text
+
+    # An empty submission is an informational note, never a blocking error page.
+    _smoke_button(app, t("analyze_product", "en")).click().run()
+    assert list(app.exception) == []
+    assert list(app.error) == []
+    assert t("describe_required", "en") in _all_text(app)
+
+
+def test_ui_modules_other_than_i18n_contain_no_hard_coded_chinese() -> None:
+    """UI-owned Chinese lives only in the central translation dictionary."""
+    for path in sorted(UI_DIR.glob("*.py")):
+        if path.name == "i18n.py":
+            continue
+        source = path.read_text(encoding="utf-8")
+        assert not CJK.search(source), f"{path.name} contains hard-coded Chinese copy"
+
+
+def test_ui_uses_current_streamlit_apis() -> None:
+    for path in sorted(UI_DIR.glob("*.py")) + [PROJECT_ROOT / "app.py"]:
+        source = path.read_text(encoding="utf-8")
+        assert "use_container_width" not in source, path.name
+        assert "unsafe_allow_javascript" not in source, path.name
