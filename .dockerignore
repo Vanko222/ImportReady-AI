@@ -1,0 +1,71 @@
+# Docker build context for the ImportReady AI container.
+# Rule of thumb: ship only what app.py needs at runtime (app.py, src/, data/,
+# .streamlit/config.toml, requirements.txt). Everything else stays local.
+
+# --- secrets and local environment -----------------------------------------
+.env
+.env.*
+# keep the non-secret template out of the image too (it lists variable names only)
+.env.example
+
+# --- version control --------------------------------------------------------
+.git
+.gitattributes
+.gitmodules
+
+# --- Python virtualenvs, bytecode and caches --------------------------------
+.venv
+venv
+env
+__pycache__
+**/__pycache__
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# --- harness / agent scaffolding --------------------------------------------
+.agents
+
+# --- tests (not needed at runtime) ------------------------------------------
+tests
+
+# --- development, certification and research material -----------------------
+*.md
+research/
+scripts/
+*.zip
+*.tar
+*.tar.gz
+*_Report.md
+*_Plan.md
+*.tmp
+
+# --- local certification evidence (never shipped) ---------------------------
+**/evidence/
+**/*__certification*.txt
+
+# --- scratch / temporary verification artefacts ------------------------------
+# Session scratch files (audits, probes, screenshots) must never enter an image.
+# Root-anchored so package files such as src/ui/__init__.py are never excluded.
+/_*.py
+/_*.txt
+/_*.log
+/_*.png
+
+# --- IDE / editor / OS metadata ---------------------------------------------
+.idea
+.vscode
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# NOTE: .streamlit/, app.py, src/, data/ and requirements.txt are deliberately
+# NOT excluded - the running container requires all of them.
