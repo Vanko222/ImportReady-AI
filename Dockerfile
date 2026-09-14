@@ -25,11 +25,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# The only OS package needed: curl, used by the HEALTHCHECK below.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/*
-
 # Dependencies first so this layer stays cached while only application code changes.
 COPY requirements.txt ./
 RUN python -m pip install --no-cache-dir -r requirements.txt
@@ -44,11 +39,10 @@ COPY data/ ./data/
 EXPOSE 8501
 
 # Streamlit's own health endpoint; no provider or network access is involved.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl -fsS http://localhost:8501/_stcore/health || exit 1
-
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=3).read()" || exit 1
 # Production start command: no development reload mode.
 CMD ["python", "-m", "streamlit", "run", "app.py", \
      "--server.address=0.0.0.0", \
      "--server.port=8501", \
      "--server.headless=true"]
+
